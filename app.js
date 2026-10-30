@@ -22,7 +22,8 @@ const icons = {
   building: '<rect x="4" y="3" width="16" height="18" rx="1"/><path d="M9 21v-4h6v4M8 7h1M15 7h1M8 11h1M15 11h1"/>',
   close: '<path d="m18 6-12 12M6 6l12 12"/>',
   back: '<path d="m15 18-6-6 6-6"/><path d="M20 12H9"/>',
-  filter: '<path d="M4 7h16M7 12h10M10 17h4"/>'
+  filter: '<path d="M4 7h16M7 12h10M10 17h4"/>',
+  shield: '<path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11z"/><path d="m9 12 2 2 4-4"/>'
 };
 const I = (name, size = 18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.reports}</svg>`;
 const defaultReports = [
@@ -54,7 +55,7 @@ try {
 } catch (error) {
   console.error('Data laporan tidak dapat dibaca dari penyimpanan browser.', error);
 }
-let currentPage = 'login';
+let currentPage = 'landing';
 let role = 'student';
 let currentAdminName = 'Admin';
 let selectedReport = reports[0];
@@ -101,6 +102,44 @@ function updateReportStatus(report, status, urgencyValue = report.urgency) {
     throw new Error('Perubahan status tidak dapat disimpan di browser.', { cause: error });
   }
   return statusChanged;
+}
+function setPage(page) {
+  currentPage = page;
+  if (page === 'track' && selectedReport) {
+    history.pushState({ page, reportId:selectedReport.id }, '', `#/track/${encodeURIComponent(selectedReport.id)}`);
+  } else {
+    history.pushState({ page }, '', page === 'landing' ? `${location.pathname}${location.search}` : `#/${page}`);
+  }
+  render();
+}
+function compressImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error('Foto gagal dibaca.'));
+    reader.onload = () => {
+      const image = new Image();
+      image.onerror = () => reject(new Error('File yang dipilih bukan foto yang valid.'));
+      image.onload = () => {
+        const scale = Math.min(1, 1280 / Math.max(image.naturalWidth, image.naturalHeight));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+        canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(blob => {
+          if (!blob) {
+            reject(new Error('Foto tidak dapat diproses.'));
+            return;
+          }
+          const compressedReader = new FileReader();
+          compressedReader.onerror = () => reject(compressedReader.error || new Error('Foto gagal diproses.'));
+          compressedReader.onload = () => resolve(compressedReader.result);
+          compressedReader.readAsDataURL(blob);
+        }, 'image/jpeg', .78);
+      };
+      image.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 const statusClass = status => ({ 'Menunggu Verifikasi':'waiting', 'Diproses':'processing', 'Sedang Diperbaiki':'repair', 'Selesai':'done', 'Ditolak':'rejected' }[status] || 'waiting');
 const badge = status => `<span class="status ${statusClass(status)}">${status}</span>`;
@@ -156,6 +195,83 @@ function statCard(label, value, icon, color, foot) {
 }
 function reportRows(items) {
   return items.map(r => `<div class="report-row" data-report="${escapeHTML(r.id)}"><div><div class="report-title">${escapeHTML(r.title)}</div><div class="report-meta"><span>${escapeHTML(r.id)}</span><span class="meta-dot"></span><span>${escapeHTML(r.location)}</span><span class="meta-dot"></span><span>${escapeHTML(r.date)}</span></div></div><div class="report-right">${badge(r.status)}${I('arrow',15)}</div></div>`).join('');
+}
+function publicHeader() {
+  return `<header class="public-header"><a class="public-brand" href="#" data-page="landing"><span class="public-brand-mark">${I('campus')}</span><span><strong>Ruang Lapor</strong><small>Fasilitas</small></span></a><form class="ticket-search" id="ticket-lookup"><label class="sr-only" for="ticket-id">Cari ID tiket</label>${I('search')}<input id="ticket-id" class="control" placeholder="Cari ID tiket, contoh RLF-8921" required><button type="submit" class="btn btn-primary btn-small">Lacak tiket</button></form><button class="btn btn-outline public-admin-link" data-action="admin-login">${I('shield')} Login Admin</button><button class="icon-button mobile-menu public-search-toggle" aria-label="Cari tiket" data-action="toggle-ticket-search">${I('search')}</button></header>`;
+}
+function publicStatus(status) {
+  return `<span class="public-status ${statusClass(status)}">${escapeHTML(status)}</span>`;
+}
+function publicReportCard(report, index) {
+  const category = report.category || report.facility || 'Fasilitas';
+  const location = report.location || 'Kampus';
+  const time = report.timeAgo || ['2 jam yang lalu','5 jam yang lalu','Kemarin','2 hari yang lalu'][index % 4];
+  return `<article class="public-report-card" data-public-report="${escapeHTML(report.id)}" tabindex="0" role="button" aria-label="Lacak tiket ${escapeHTML(report.id)}">
+    <div class="public-thumb">
+      ${report.image?`<img src="${escapeHTML(report.image)}" alt="Foto ${escapeHTML(report.title)}">`:`<div class="thumb-placeholder ${category==='Kelistrikan'?'thumb-electric':category==='Furnitur'||category==='Mebel/Furniture'?'thumb-furniture':category==='Plumbing'||category==='Air & Plumbing'?'thumb-water':'thumb-general'}">${I(category==='Kelistrikan'?'wrench':category==='Furnitur'||category==='Mebel/Furniture'?'building':category==='Plumbing'||category==='Air & Plumbing'?'pin':'reports',32)}</div>`}
+      <span class="category-tag">${escapeHTML(category)}</span>
+    </div>
+    <div class="public-report-body"><div class="public-report-title">${escapeHTML(report.title)}</div><div class="public-report-meta">${I('pin',14)}<span>${escapeHTML(location)}</span><span class="public-meta-dot">·</span><span>${escapeHTML(time)}</span></div></div>
+    <footer class="public-report-footer">${publicStatus(report.status)}<span class="ticket-reference">${escapeHTML(report.id)}</span></footer>
+  </article>`;
+}
+function landingPage() {
+  const latest = [...reports].slice(0,6);
+  return `<div class="public-site">${publicHeader()}<main class="public-main">
+    <section class="public-hero">
+      <div class="hero-copy"><span class="hero-kicker">${I('shield',15)} PELAPORAN FASILITAS KAMPUS</span><h1>Laporkan Kerusakan Fasilitas dengan Cepat &amp; Transparan</h1><p>Bantu kami menjaga kenyamanan lingkungan bersama. Tanggapan cepat, status terbuka.</p>
+        <div class="hero-actions"><button class="btn btn-primary btn-hero" data-page="report">${I('plus')} Buat Laporan Sekarang</button><button class="btn btn-outline btn-hero" data-action="focus-ticket">${I('search')} Cek Status Tiket</button></div>
+        <div class="hero-promise"><span>${I('check',15)} Gratis dan mudah</span><span>${I('clock',15)} Pantau setiap saat</span></div>
+      </div>
+      <div class="hero-aside"><div class="hero-status-card"><span class="status-card-icon">${I('reports',20)}</span><div><strong>Pelaporan terbuka</strong><small>Setiap laporan dapat dipantau sampai selesai.</small></div><span class="online-indicator"></span></div><div class="hero-aside-note"><span class="hero-note-line"></span><p>Satu laporan kecil dapat membuat ruang belajar lebih nyaman untuk semua.</p></div></div>
+    </section>
+    <section class="public-metrics" aria-label="Ringkasan laporan"><div class="metric-item"><strong>124</strong><span>Total Laporan Masuk</span></div><div class="metric-item"><strong>98</strong><span>Laporan Selesai</span></div><div class="metric-item"><strong>24 <small>Jam</small></strong><span>Rata-rata Penanganan</span></div></section>
+    <section class="public-feed" id="laporan-terkini"><div class="feed-heading"><div><span class="section-kicker">TRANSPARANSI KAMPUS</span><h2>Laporan Terkini</h2><p>Lihat laporan fasilitas yang sedang ditangani di lingkungan kampus.</p></div><button class="btn btn-outline" data-page="report">${I('plus')} Buat laporan</button></div>
+      <div class="public-report-grid">${latest.length?latest.map(publicReportCard).join(''):`<div class="public-empty"><div class="empty-illustration">${I('reports')}</div><h3>Belum ada laporan terkini</h3><p>Jadilah yang pertama melaporkan fasilitas yang perlu diperbaiki.</p></div>`}</div>
+      <div class="feed-footnote">${I('shield',15)} Informasi pelapor tidak ditampilkan di halaman publik.</div>
+    </section>
+  </main><footer class="public-footer"><span>© 2026 Ruang Lapor Fasilitas · Universitas Nusantara</span><span>Untuk lingkungan kampus yang lebih nyaman.</span></footer></div>`;
+}
+function publicReportForm() {
+  return `<div class="public-site">${publicHeader()}<main class="public-form-page">
+    <button class="back-login" data-page="landing">${I('back')} Kembali ke beranda</button>
+    <header class="public-form-heading"><span class="hero-kicker">LAPORAN FASILITAS</span><h1>Buat Laporan</h1><p>Isi informasi kerusakan dengan jelas. Tim fasilitas akan menindaklanjuti laporan Anda.</p></header>
+    <form class="public-form-card" id="public-report-form">
+      <section class="public-form-section"><h2><span class="form-step">01</span> Kategori &amp; Lokasi</h2>
+        <div class="public-field-grid">
+          <div class="field"><label for="public-category">Kategori <span class="required">*</span></label><select class="control" id="public-category" required><option value="">Pilih kategori fasilitas</option><option>Kelistrikan</option><option>Air &amp; Plumbing</option><option>Mebel/Furniture</option><option>Kebersihan</option><option>Lainnya</option></select></div>
+          <div class="field"><label for="public-building">Gedung / area <span class="required">*</span></label><select class="control" id="public-building" required><option value="">Pilih gedung atau area</option><option>Gedung A</option><option>Gedung B</option><option>Gedung C</option><option>Gedung D</option><option>Area luar</option></select></div>
+          <div class="field public-field-full"><label for="public-location">Detail lokasi <span class="required">*</span></label><input class="control" id="public-location" required placeholder="Contoh: Ruang Kelas 302, dekat jendela kanan"></div>
+          <div class="field public-field-full"><label for="public-title">Ringkasan kerusakan <span class="required">*</span></label><input class="control" id="public-title" required maxlength="90" placeholder="Contoh: AC Gedung A mati total"></div>
+        </div>
+      </section>
+      <section class="public-form-section"><h2><span class="form-step">02</span> Bukti Foto</h2>
+        <label class="public-upload" id="public-upload-zone" for="public-photo-input">${I('upload',24)}<strong id="public-upload-title">Pilih foto atau tarik file ke sini</strong><small>Format JPG, PNG, atau WEBP · Maksimal 5 MB</small><input type="file" id="public-photo-input" accept="image/jpeg,image/png,image/webp" hidden></label>
+        <div class="public-photo-preview hidden" id="public-photo-preview"><img id="public-photo-image" alt="Pratinjau foto kerusakan"><span id="public-photo-name"></span><button type="button" class="icon-button" data-action="remove-public-photo" aria-label="Hapus foto">${I('close')}</button></div>
+      </section>
+      <section class="public-form-section"><h2><span class="form-step">03</span> Deskripsi Kerusakan</h2><div class="field"><label for="public-description">Ceritakan masalahnya <span class="required">*</span></label><textarea class="control" id="public-description" required maxlength="1200" placeholder="Jelaskan detail kerusakan yang terjadi..."></textarea><span class="helper">Sertakan kapan kerusakan terjadi dan dampaknya bagi kegiatan kampus.</span></div></section>
+      <section class="public-form-section public-privacy-section"><label class="anonymous-check"><input type="checkbox" id="anonymous-report"><span class="checkmark"></span><span><strong>Kirim sebagai Laporan Anonim</strong><small>Nama Anda tidak akan ditampilkan pada laporan.</small></span></label><div class="field" id="public-reporter-field"><label for="public-reporter">Nama pelapor <span class="required">*</span></label><input class="control" id="public-reporter" required value="${escapeHTML(currentUser.name)}" placeholder="Nama lengkap"></div></section>
+      <footer class="public-form-actions"><button type="button" class="btn btn-ghost" data-page="landing">Batal</button><button type="submit" class="btn btn-primary">${I('arrow')} Kirim Laporan</button></footer>
+    </form>
+  </main><footer class="public-footer"><span>© 2026 Ruang Lapor Fasilitas · Universitas Nusantara</span><span>Data laporan pada prototipe disimpan di browser ini.</span></footer></div>`;
+}
+function trackingPage() {
+  const report=selectedReport;
+  const state=['Menunggu Verifikasi','Diproses','Sedang Diperbaiki','Selesai'].includes(report.status)?report.status:'Ditolak';
+  const activeIndex=state==='Menunggu Verifikasi'?1:state==='Diproses'?2:state==='Sedang Diperbaiki'?3:state==='Selesai'?4:1;
+  const timeline=[
+    {title:'Laporan Diterima',detail:'Laporan berhasil masuk ke sistem.',status:'done'},
+    {title:'Diverifikasi Admin',detail:report.history?.some(item=>item.status==='Diproses')?'Laporan valid, diteruskan ke tim teknis.':'Menunggu pemeriksaan oleh pengelola.',status:activeIndex>1?'done':activeIndex===1?'active':'pending'},
+    {title:'Petugas Ditugaskan',detail:state==='Sedang Diperbaiki'||state==='Selesai'?'Petugas: Tim Fasilitas Kampus':'Petugas akan ditugaskan setelah laporan diverifikasi.',status:activeIndex>2?'done':activeIndex===2?'active':'pending'},
+    {title:'Perbaikan Selesai',detail:state==='Selesai'?'Penanganan laporan telah selesai.':'Bukti perbaikan akan ditampilkan setelah pekerjaan selesai.',status:state==='Selesai'?'done':state==='Sedang Diperbaiki'?'active':'pending'}
+  ];
+  return `<div class="public-site">${publicHeader()}<main class="public-track-page"><button class="back-login" data-page="landing">${I('back')} Kembali ke beranda</button>
+    <header class="track-heading"><div><span class="section-kicker">PELACAKAN LAPORAN</span><h1>Perkembangan Tiket</h1><p>Pantau setiap tahap penanganan laporan fasilitas Anda.</p></div>${publicStatus(report.status)}</header>
+    <div class="track-ticket-meta"><span class="ticket-id-large">Tiket #${escapeHTML(report.id)}</span><span>Dikirim ${escapeHTML(report.date)}</span></div>
+    <section class="track-summary"><div class="track-summary-copy"><span class="category-tag">${escapeHTML(report.category||report.facility)}</span><h2>${escapeHTML(report.title)}</h2><p>${I('pin',16)} ${escapeHTML(report.location)}</p><p class="track-description">${escapeHTML(report.description)}</p></div>${report.image?`<img class="track-photo" src="${escapeHTML(report.image)}" alt="Foto fasilitas rusak">`:`<div class="track-photo track-photo-placeholder">${I('reports',30)}<span>Foto tidak dilampirkan</span></div>`}</section>
+    <section class="timeline-panel"><div class="panel-heading"><div><h2>Status Penanganan</h2><p>Progres laporan dari diterima hingga selesai</p></div></div><div class="public-timeline">${timeline.map(item=>`<div class="public-timeline-item ${item.status}"><span class="public-timeline-node">${item.status==='done'?I('check',13):''}</span><div><strong>${item.title}</strong><p>${item.detail}</p></div></div>`).join('')}</div></section>
+    <div class="track-notice">${I('bell',17)} <span>Perubahan status dapat dilihat kembali menggunakan ID tiket <strong>${escapeHTML(report.id)}</strong>.</span></div>
+  </main><footer class="public-footer"><span>© 2026 Ruang Lapor Fasilitas · Universitas Nusantara</span><span>Untuk lingkungan kampus yang lebih nyaman.</span></footer></div>`;
 }
 function studentHome() {
   const userReports = reports.filter(r => r.reporter === currentUser.name);
@@ -265,7 +381,12 @@ function loginPage(adminMode = false) {
 }
 function render() {
   const pages = { home:studentHome, create:createReport, mine:myReports, detail:detailPage, notifications:notificationsPage, adminHome, manage:managementPage, handling:handlingPage, profile:profilePage };
-  document.getElementById('app').innerHTML = currentPage === 'login' ? loginPage(role==='admin') : shell(pages[currentPage]());
+  const publicPages = { landing:landingPage, report:publicReportForm, track:trackingPage };
+  document.getElementById('app').innerHTML = currentPage === 'login'
+    ? loginPage(role==='admin')
+    : publicPages[currentPage]
+      ? publicPages[currentPage]()
+      : shell(pages[currentPage]());
 }
 function showToast(message) {
   const region = document.getElementById('toast-region');
@@ -305,16 +426,31 @@ function applyAdminFilters() {
   document.getElementById('admin-table').innerHTML=rows.length?rows.map(adminRow).join(''):`<tr><td colspan="8"><div class="empty-state"><div class="empty-illustration">${I('search')}</div><h3>Laporan tidak ditemukan</h3><p>Coba ubah kata kunci atau filter yang dipilih.</p></div></td></tr>`;
 }
 document.addEventListener('click', e => {
+  const publicCard=e.target.closest('[data-public-report]');
+  if(publicCard){
+    selectedReport=reports.find(report=>report.id===publicCard.dataset.publicReport);
+    if(selectedReport){selectedImage=selectedReport.image||'';setPage('track');}
+    return;
+  }
   const pageButton=e.target.closest('[data-page]');
-  if(pageButton){e.preventDefault();currentPage=pageButton.dataset.page;render();return;}
+  if(pageButton){e.preventDefault();setPage(pageButton.dataset.page);return;}
   const reportButton=e.target.closest('[data-report]');
   if(reportButton){openReport(reportButton.dataset.report,role==='admin');return;}
   const action=e.target.closest('[data-action]')?.dataset.action;
   if(!action)return;
   if(action==='menu')document.getElementById('sidebar')?.classList.toggle('open');
-  if(action==='logout'){role='student';currentPage='login';render();}
-  if(action==='admin-login'){e.preventDefault();role='admin';render();}
-  if(action==='student-login'){role='student';render();}
+  if(action==='logout'){role='student';setPage('landing');}
+  if(action==='admin-login'){e.preventDefault();role='admin';setPage('login');}
+  if(action==='student-login'){role='student';setPage('login');}
+  if(action==='focus-ticket'){const search=document.querySelector('.ticket-search');search?.classList.add('search-open','search-focused');search?.scrollIntoView({behavior:'smooth',block:'center'});document.getElementById('ticket-id')?.focus();}
+  if(action==='toggle-ticket-search'){document.querySelector('.ticket-search')?.classList.toggle('search-open');document.getElementById('ticket-id')?.focus();}
+  if(action==='remove-public-photo'){
+    selectedImage='';
+    const input=document.getElementById('public-photo-input');
+    if(input)input.value='';
+    document.getElementById('public-photo-preview')?.classList.add('hidden');
+    document.getElementById('public-upload-zone')?.classList.remove('hidden');
+  }
   if(action==='toggle-password'){const field=document.getElementById('login-password');field.type=field.type==='password'?'text':'password';e.currentTarget.innerHTML=I(field.type==='password'?'eye':'eyeOff');}
   if(action==='forgot'){e.preventDefault();showToast('Silakan hubungi helpdesk kampus untuk reset password.');}
   if(action==='read-all'){document.querySelectorAll('.notification-item.unread').forEach(x=>x.classList.remove('unread'));document.querySelectorAll('.unread-dot').forEach(x=>x.remove());showToast('Semua notifikasi ditandai sudah dibaca.');}
@@ -352,6 +488,14 @@ document.addEventListener('input',e=>{
   }
 });
 document.addEventListener('change',e=>{
+  if(e.target.id==='anonymous-report'){
+    const reporterField=document.getElementById('public-reporter-field');
+    const reporterInput=document.getElementById('public-reporter');
+    if(reporterField&&reporterInput){
+      reporterField.classList.toggle('hidden',e.target.checked);
+      reporterInput.required=!e.target.checked;
+    }
+  }
   if(['status-filter','category-filter'].includes(e.target.id))applyMineFilters();
   if(['admin-status','admin-priority'].includes(e.target.id))applyAdminFilters();
   if(e.target.matches('.admin-status-select')){
@@ -374,8 +518,92 @@ document.addEventListener('change',e=>{
       document.getElementById('upload-label').textContent=file.name;
     }
   }
+  if(e.target.id==='public-photo-input'){
+    const file=e.target.files[0];
+    if(file){
+      if(file.size>5*1024*1024){showToast('Ukuran foto maksimal 5 MB.');e.target.value='';return;}
+      if(!file.type.startsWith('image/')){showToast('Pilih file gambar JPG, PNG, atau WEBP.');e.target.value='';return;}
+      compressImageFile(file).then(imageData=>{
+        selectedImage=imageData;
+        const preview=document.getElementById('public-photo-preview');
+        document.getElementById('public-photo-image').src=selectedImage;
+        document.getElementById('public-photo-name').textContent=file.name;
+        preview.classList.remove('hidden');
+        document.getElementById('public-upload-zone').classList.add('hidden');
+      }).catch(error=>{
+        showToast(error.message);
+        e.target.value='';
+      });
+    }
+  }
+});
+document.addEventListener('keydown',e=>{
+  if((e.key==='Enter'||e.key===' ')&&e.target.matches('[data-public-report]')){
+    e.preventDefault();
+    e.target.click();
+  }
+});
+document.addEventListener('dragover',e=>{
+  if(e.target.closest('#public-upload-zone'))e.preventDefault();
+});
+document.addEventListener('drop',e=>{
+  const zone=e.target.closest('#public-upload-zone');
+  if(!zone)return;
+  e.preventDefault();
+  const file=e.dataTransfer.files[0];
+  if(!file)return;
+  const input=document.getElementById('public-photo-input');
+  const transfer=new DataTransfer();
+  transfer.items.add(file);
+  input.files=transfer.files;
+  input.dispatchEvent(new Event('change',{bubbles:true}));
 });
 document.addEventListener('submit',e=>{
+  if(e.target.id==='ticket-lookup'){
+    e.preventDefault();
+    const ticketId=document.getElementById('ticket-id').value.trim().toUpperCase();
+    const report=reports.find(item=>item.id.toUpperCase()===ticketId);
+    if(!report){showToast('ID tiket tidak ditemukan. Periksa kembali nomor tiket Anda.');return;}
+    selectedReport=report;
+    selectedImage=report.image||'';
+    setPage('track');
+    return;
+  }
+  if(e.target.id==='public-report-form'){
+    e.preventDefault();
+    const form=e.target;
+    showModal('Kirim laporan sekarang?','Pastikan lokasi dan deskripsi sudah sesuai. Setelah dikirim, simpan ID tiket untuk memantau progresnya.','Ya, kirim laporan',()=>{
+      const category=form.querySelector('#public-category').value;
+      const building=form.querySelector('#public-building').value;
+      const details=form.querySelector('#public-location').value.trim();
+      const reporter=form.querySelector('#anonymous-report').checked?'Anonim':form.querySelector('#public-reporter').value.trim();
+      const ticketNumber=Math.max(8920,...reports.map(report=>Number(report.id.match(/^RLF-(\d+)$/)?.[1]||0)))+1;
+      const createdAt=new Date();
+      const newReport={
+        id:`RLF-${ticketNumber}`,
+        title:form.querySelector('#public-title').value.trim(),
+        facility:category,
+        category,
+        location:`${building} · ${details}`,
+        date:createdAt.toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'}),
+        timeAgo:'Baru saja',
+        status:'Menunggu Verifikasi',
+        urgency:'Sedang',
+        reporter,
+        anonymous:form.querySelector('#anonymous-report').checked,
+        description:form.querySelector('#public-description').value.trim(),
+        image:selectedImage,
+        history:[{status:'Laporan Diterima',date:createdAt.toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})}]
+      };
+      reports.unshift(newReport);
+      try{saveReports();}catch(error){reports.shift();showToast('Laporan belum dapat disimpan di browser ini.');return;}
+      selectedReport=newReport;
+      selectedImage=newReport.image||'';
+      setPage('track');
+      showToast(`Laporan terkirim. Simpan tiket #${newReport.id} untuk melacaknya.`);
+    });
+    return;
+  }
   if(e.target.id==='login-form'){
     e.preventDefault();
     role=role==='admin'?'admin':'student';
@@ -394,4 +622,21 @@ document.addEventListener('submit',e=>{
   if(e.target.id==='report-form'){e.preventDefault();showModal('Kirim laporan sekarang?','Pastikan informasi dan lokasi kerusakan sudah benar. Laporan akan dikirim ke tim fasilitas untuk diverifikasi.','Ya, kirim laporan',()=>{const form=e.target;const title=form.querySelector('input[placeholder^="Contoh: Lampu"]').value.trim();const location=form.querySelector('input[placeholder^="Contoh: Gedung"]').value.trim();const reporter=form.querySelector('#reporter-name').value.trim();const cat=form.querySelectorAll('select')[1].value;const nextId=Math.max(...reports.map(report=>Number(report.id.slice(report.id.lastIndexOf('-')+1))))+1;const newReport={id:`LAP-2026-${String(nextId).padStart(3,'0')}`,title,facility:cat,location,date:'28 Okt 2026',status:'Menunggu Verifikasi',urgency:form.querySelector('input[name="urgency"]:checked')?.value||'Sedang',reporter,category:cat,description:form.querySelector('textarea').value.trim(),image:selectedImage,history:[{status:'Laporan dikirim',date:'28 Okt 2026'}]};reports.unshift(newReport);try{saveReports();}catch(error){reports.shift();showToast('Laporan belum dapat disimpan di browser. Coba lagi.');return;}selectedReport=newReport;currentUser.name=reporter;selectedImage=selectedReport.image||'';currentPage='detail';render();showToast('Laporan berhasil dikirim! Kami akan memberi kabar saat status diperbarui.');});}
 });
 document.addEventListener('click',e=>{if(e.target.closest('[data-page="create"]')&&currentPage==='create')return;});
+window.addEventListener('popstate',()=>{
+  const route=location.hash.match(/^#\/track\/(.+)$/);
+  if(route){
+    const report=reports.find(item=>item.id===decodeURIComponent(route[1]));
+    if(report){selectedReport=report;selectedImage=report.image||'';currentPage='track';}
+    else currentPage='landing';
+  }else if(location.hash==='#/report')currentPage='report';
+  else if(['home','create','mine','detail','notifications','adminHome','manage','handling','profile','login'].includes(history.state?.page)){
+    currentPage=history.state.page;
+  }else currentPage='landing';
+  render();
+});
+const initialTrack=location.hash.match(/^#\/track\/(.+)$/);
+if(initialTrack){
+  const report=reports.find(item=>item.id===decodeURIComponent(initialTrack[1]));
+  if(report){selectedReport=report;selectedImage=report.image||'';currentPage='track';}
+}else if(location.hash==='#/report')currentPage='report';
 render();
