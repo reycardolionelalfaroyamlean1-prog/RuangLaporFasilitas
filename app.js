@@ -34,26 +34,68 @@ const defaultReports = [
   { id: 'LAP-2026-048', title: 'Pintu ruang kelas macet', facility: 'Pintu & Jendela', location: 'Gedung D · Ruang 301', date: '12 Okt 2026', status: 'Ditolak', urgency: 'Rendah', reporter: 'Salsa Amalia', category: 'Bangunan', description: 'Pintu ruang kelas sulit dibuka dan ditutup.' },
 ];
 const reportsStorageKey = 'ruanglapor.reports';
-let reports = [...defaultReports];
-try {
-  const savedReports = localStorage.getItem(reportsStorageKey);
-  if (savedReports) {
-    const parsedReports = JSON.parse(savedReports);
-    if (Array.isArray(parsedReports)) {
-      reports = defaultReports.map(defaultReport => {
-        const savedReport = parsedReports.find(report => report.id === defaultReport.id);
-        return savedReport && typeof savedReport.status === 'string'
-          ? { ...defaultReport, ...savedReport }
-          : defaultReport;
-      });
-      parsedReports.filter(report => !defaultReports.some(defaultReport => defaultReport.id === report.id))
-        .forEach(report => reports.push(report));
-    } else {
-      console.error('Data laporan tersimpan tidak valid; menggunakan data contoh.');
-    }
+const userStorageKey = 'ruanglapor.user';
+const reportStatuses = ['Menunggu Verifikasi','Diproses','Sedang Diperbaiki','Selesai','Ditolak'];
+let storageWarning = false;
+function readStoredValue(key, description) {
+  try {
+    return window.localStorage.getItem(key);
+  } catch (error) {
+    storageWarning = true;
+    console.error(`${description} tidak dapat dibaca dari penyimpanan browser.`, error);
+    return null;
   }
-} catch (error) {
-  console.error('Data laporan tidak dapat dibaca dari penyimpanan browser.', error);
+}
+function writeStoredValue(key, value, description) {
+  try {
+    window.localStorage.setItem(key, value);
+    return true;
+  } catch (error) {
+    storageWarning = true;
+    console.error(`${description} tidak dapat disimpan di penyimpanan browser.`, error);
+    return false;
+  }
+}
+function isValidReport(report) {
+  return Boolean(report && typeof report === 'object' && !Array.isArray(report) &&
+    ['id','title','facility','location','date','status','urgency','reporter','category','description']
+      .every(key => typeof report[key] === 'string'));
+}
+function normalizeReport(report) {
+  const history = Array.isArray(report.history)
+    ? report.history.filter(entry => entry && typeof entry.status === 'string' && typeof entry.date === 'string')
+      .map(entry => ({ status: entry.status, date: entry.date }))
+    : [];
+  return {
+    ...report,
+    image: typeof report.image === 'string' ? report.image : '',
+    timeAgo: typeof report.timeAgo === 'string' ? report.timeAgo : '',
+    urgency: ['Rendah','Sedang','Tinggi'].includes(report.urgency) ? report.urgency : 'Sedang',
+    status: reportStatuses.includes(report.status) ? report.status : 'Menunggu Verifikasi',
+    history,
+  };
+}
+function loadReports(saved) {
+  if (saved === null) return [...defaultReports];
+  try {
+    const parsed = JSON.parse(saved);
+    if (!Array.isArray(parsed)) throw new Error('Format data laporan bukan daftar.');
+    const validReports = parsed.filter(isValidReport);
+    if (validReports.length !== parsed.length) {
+      storageWarning = true;
+      console.warn('Beberapa laporan tersimpan tidak valid dan dilewati.');
+    }
+    return validReports.length ? validReports.map(normalizeReport) : [...defaultReports];
+  } catch (error) {
+    storageWarning = true;
+    console.error('Data laporan tersimpan tidak valid; menggunakan data contoh.', error);
+    return [...defaultReports];
+  }
+}
+const savedReports = readStoredValue(reportsStorageKey, 'Data laporan');
+let reports = loadReports(savedReports);
+if (savedReports === null && !storageWarning) {
+  writeStoredValue(reportsStorageKey, JSON.stringify(reports), 'Data awal laporan');
 }
 let currentPage = 'login';
 let role = 'student';
@@ -61,17 +103,41 @@ let currentAdminName = 'Admin';
 let selectedReport = reports[0];
 let selectedImage = '';
 let toastTimer;
-let currentUser = {
+const defaultUser = {
   name: 'Rey Yamlean',
   npm: '202555201048',
   email: 'reyyamlean@kampus.ac.id',
 };
+let currentUser = {
+  ...defaultUser,
+};
+const savedUser = readStoredValue(userStorageKey, 'Data akun');
+if (savedUser !== null) {
+  try {
+    const parsedUser = JSON.parse(savedUser);
+    if (parsedUser && typeof parsedUser === 'object' && !Array.isArray(parsedUser) &&
+        typeof parsedUser.name === 'string' && parsedUser.name.trim()) {
+      currentUser = {
+        name: parsedUser.name.trim(),
+        npm: typeof parsedUser.npm === 'string' ? parsedUser.npm : defaultUser.npm,
+        email: typeof parsedUser.email === 'string' ? parsedUser.email : defaultUser.email,
+      };
+    } else {
+      storageWarning = true;
+      console.warn('Data akun tersimpan tidak valid; menggunakan profil awal.');
+    }
+  } catch (error) {
+    storageWarning = true;
+    console.error('Data akun tersimpan tidak dapat dibaca; menggunakan profil awal.', error);
+  }
+}
 
 const escapeHTML = value => String(value).replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char]));
 const userInitials = name => name.trim().split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase() || 'M';
-const reportStatuses = ['Menunggu Verifikasi','Diproses','Sedang Diperbaiki','Selesai','Ditolak'];
 function saveReports() {
-  localStorage.setItem(reportsStorageKey, JSON.stringify(reports));
+  if (!writeStoredValue(reportsStorageKey, JSON.stringify(reports), 'Data laporan')) {
+    throw new Error('Perubahan laporan tidak dapat disimpan di browser ini.');
+  }
 }
 function updateReportStatus(report, status, urgencyValue = report.urgency) {
   if (!reportStatuses.includes(status)) {
@@ -120,11 +186,20 @@ function compressImageFile(file) {
       const image = new Image();
       image.onerror = () => reject(new Error('File yang dipilih bukan foto yang valid.'));
       image.onload = () => {
+        if (!image.naturalWidth || !image.naturalHeight) {
+          reject(new Error('Foto tidak memiliki ukuran yang dapat diproses.'));
+          return;
+        }
         const scale = Math.min(1, 1280 / Math.max(image.naturalWidth, image.naturalHeight));
         const canvas = document.createElement('canvas');
         canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
         canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
-        canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+        const context = canvas.getContext('2d');
+        if (!context) {
+          reject(new Error('Browser tidak dapat memproses foto ini.'));
+          return;
+        }
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
         canvas.toBlob(blob => {
           if (!blob) {
             reject(new Error('Foto tidak dapat diproses.'));
@@ -162,7 +237,6 @@ reports.forEach(report => {
   }
 });
 
-function isAdminPage() { return ['adminHome', 'manage', 'handling'].includes(currentPage); }
 function navButton(page, icon, label, active = currentPage === page, extra = '') {
   return `<button class="nav-item ${active ? 'active' : ''}" data-page="${page}">${I(icon)}<span>${label}</span>${extra}</button>`;
 }
@@ -475,9 +549,21 @@ document.addEventListener('click', e => {
     const name=document.getElementById('profile-name').value.trim();
     const npm=document.getElementById('profile-npm').value.trim();
     if(!name||!npm){showToast('Nama lengkap dan NPM wajib diisi.');return;}
-    const previousName=currentUser.name;
-    reports.forEach(report=>{if(report.reporter===previousName)report.reporter=name;});
-    currentUser={...currentUser,name,npm,email:document.getElementById('profile-email').value.trim()};
+    const updatedUser={...currentUser,name,npm,email:document.getElementById('profile-email').value.trim()};
+    const updatedReports=reports.map(report=>report.reporter===currentUser.name?{...report,reporter:name}:report);
+    if(!writeStoredValue(userStorageKey,JSON.stringify(updatedUser),'Data akun')){
+      showToast('Profil belum dapat disimpan. Periksa pengaturan penyimpanan browser dan coba lagi.');
+      return;
+    }
+    if(!writeStoredValue(reportsStorageKey,JSON.stringify(updatedReports),'Data laporan')){
+      const rolledBack=writeStoredValue(userStorageKey,JSON.stringify(currentUser),'Pemulihan data akun');
+      showToast(rolledBack
+        ?'Perubahan profil dibatalkan karena laporan tidak dapat disimpan.'
+        :'Profil dan laporan tidak tersimpan secara konsisten. Muat ulang setelah penyimpanan browser tersedia.');
+      return;
+    }
+    currentUser=updatedUser;
+    reports=updatedReports;
     render(true);
     showToast('Nama dan NPM berhasil diperbarui.');
   }
@@ -488,8 +574,8 @@ document.addEventListener('input',e=>{
   if(e.target.id==='profile-name'){
     const preview=document.getElementById('profile-preview-name');
     const avatar=document.getElementById('profile-avatar');
-    if(preview)preview.textContent=e.target.value;
-    if(avatar)avatar.textContent=userInitials(e.target.value);
+    if(preview)preview.textContent=e.target.value.trim();
+    if(avatar)avatar.textContent=userInitials(e.target.value.trim());
   }
 });
 document.addEventListener('change',e=>{
@@ -566,9 +652,19 @@ document.addEventListener('drop',e=>{
 document.addEventListener('submit',e=>{
   if(e.target.id==='ticket-lookup'){
     e.preventDefault();
-    const ticketId=document.getElementById('ticket-id').value.trim().toUpperCase();
+    const ticketInput=document.getElementById('ticket-id');
+    const ticketId=(ticketInput?.value || '').trim().toUpperCase();
+    if(!ticketId){
+      showToast('Masukkan ID tiket terlebih dahulu.');
+      ticketInput?.focus();
+      return;
+    }
     const report=reports.find(item=>item.id.toUpperCase()===ticketId);
-    if(!report){showToast('ID tiket tidak ditemukan. Periksa kembali nomor tiket Anda.');return;}
+    if(!report){
+      showToast('ID tiket tidak ditemukan. Periksa kembali nomor tiket Anda.');
+      ticketInput?.focus();
+      return;
+    }
     selectedReport=report;
     selectedImage=report.image||'';
     setPage('track');
@@ -577,23 +673,65 @@ document.addEventListener('submit',e=>{
   if(e.target.id==='public-report-form'){
     e.preventDefault();
     const form=e.target;
+    const categorySelect=form.querySelector('#public-category');
+    const category=categorySelect?.value || '';
+    const buildingSelect=form.querySelector('#public-building');
+    const building=buildingSelect?.value || '';
+    const locationInput=form.querySelector('#public-location');
+    const details=(locationInput?.value || '').trim();
+    const titleInput=form.querySelector('#public-title');
+    const title=(titleInput?.value || '').trim();
+    const descTextarea=form.querySelector('#public-description');
+    const description=(descTextarea?.value || '').trim();
+    const anonymous=form.querySelector('#anonymous-report')?.checked;
+    const reporterInput=form.querySelector('#public-reporter');
+    const reporter=anonymous?'Anonim':(reporterInput?.value || '').trim();
+
+    if(!category){
+      showToast('Pilih kategori fasilitas terlebih dahulu.');
+      categorySelect?.focus();
+      return;
+    }
+    if(!building){
+      showToast('Pilih gedung atau area lokasi fasilitas.');
+      buildingSelect?.focus();
+      return;
+    }
+    if(!details || details.length < 3){
+      showToast('Isi detail lokasi dengan jelas.');
+      locationInput?.focus();
+      return;
+    }
+    if(!title || title.length < 3){
+      showToast('Isi ringkasan kerusakan dengan jelas.');
+      titleInput?.focus();
+      return;
+    }
+    if(!description || description.length < 5){
+      showToast('Deskripsi kerusakan harus diisi.');
+      descTextarea?.focus();
+      return;
+    }
+    if(!anonymous && (!reporter || reporter.length < 2)){
+      showToast('Nama pelapor wajib diisi.');
+      reporterInput?.focus();
+      return;
+    }
+
     showModal('Kirim laporan sekarang?','Pastikan lokasi dan deskripsi sudah sesuai. Setelah dikirim, simpan ID tiket untuk memantau progresnya.','Ya, kirim laporan',()=>{
       const submitButton=form.querySelector('button[type="submit"]');
-      const originalLabel=submitButton.innerHTML;
-      submitButton.disabled=true;
-      submitButton.setAttribute('aria-busy','true');
-      submitButton.innerHTML='<span class="loading-spinner" aria-hidden="true"></span> Mengirim...';
+      const originalLabel=submitButton ? submitButton.innerHTML : '';
+      if(submitButton){
+        submitButton.disabled=true;
+        submitButton.setAttribute('aria-busy','true');
+        submitButton.innerHTML='<span class="loading-spinner" aria-hidden="true"></span> Mengirim...';
+      }
       setTimeout(()=>{
-        const category=form.querySelector('#public-category').value;
-        const building=form.querySelector('#public-building').value;
-        const details=form.querySelector('#public-location').value.trim();
-        const anonymous=form.querySelector('#anonymous-report').checked;
-        const reporter=anonymous?'Anonim':form.querySelector('#public-reporter').value.trim();
         const ticketNumber=Math.max(8920,...reports.map(report=>Number(report.id.match(/^RLF-(\d+)$/)?.[1]||0)))+1;
         const createdAt=new Date();
         const newReport={
           id:`RLF-${ticketNumber}`,
-          title:form.querySelector('#public-title').value.trim(),
+          title,
           facility:category,
           category,
           location:`${building} · ${details}`,
@@ -603,16 +741,20 @@ document.addEventListener('submit',e=>{
           urgency:'Sedang',
           reporter,
           anonymous,
-          description:form.querySelector('#public-description').value.trim(),
+          description,
           image:selectedImage,
           history:[{status:'Laporan Diterima',date:createdAt.toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})}]
         };
         reports.unshift(newReport);
-        try{saveReports();}catch(error){
+        try{
+          saveReports();
+        }catch(error){
           reports.shift();
-          submitButton.disabled=false;
-          submitButton.removeAttribute('aria-busy');
-          submitButton.innerHTML=originalLabel;
+          if(submitButton){
+            submitButton.disabled=false;
+            submitButton.removeAttribute('aria-busy');
+            submitButton.innerHTML=originalLabel;
+          }
           showToast('Laporan belum dapat disimpan di browser ini.');
           return;
         }
@@ -626,27 +768,166 @@ document.addEventListener('submit',e=>{
   }
   if(e.target.id==='login-form'){
     e.preventDefault();
-    role=role==='admin'?'admin':'student';
+    let userSaved=true;
     if(role==='admin'){
-      currentAdminName=document.getElementById('admin-name').value.trim();
+      const adminInput=document.getElementById('admin-name');
+      const passInput=document.getElementById('login-password');
+      const name=(adminInput?.value || '').trim();
+      const pass=(passInput?.value || '').trim();
+      if(!name){
+        showToast('Nama admin wajib diisi.');
+        adminInput?.focus();
+        return;
+      }
+      if(!pass){
+        showToast('Password wajib diisi.');
+        passInput?.focus();
+        return;
+      }
+      currentAdminName=name;
     } else {
-      const name=document.getElementById('login-name').value.trim();
-      const npm=document.getElementById('login-id').value.trim();
+      const nameInput=document.getElementById('login-name');
+      const npmInput=document.getElementById('login-id');
+      const passInput=document.getElementById('login-password');
+      const name=(nameInput?.value || '').trim();
+      const npm=(npmInput?.value || '').trim();
+      const pass=(passInput?.value || '').trim();
+      if(!name){
+        showToast('Nama lengkap wajib diisi.');
+        nameInput?.focus();
+        return;
+      }
+      if(!npm){
+        showToast('NPM wajib diisi.');
+        npmInput?.focus();
+        return;
+      }
+      if(!pass){
+        showToast('Password wajib diisi.');
+        passInput?.focus();
+        return;
+      }
       const email=name===currentUser.name&&npm===currentUser.npm?currentUser.email:'';
-      currentUser={...currentUser,name,npm,email};
+      const nextUser={...currentUser,name,npm,email};
+      userSaved=writeStoredValue(userStorageKey,JSON.stringify(nextUser),'Data akun');
+      currentUser=nextUser;
     }
     currentPage=role==='admin'?'adminHome':'home';
     render(true);
-    showToast(`Selamat datang, ${role==='admin'?currentAdminName:currentUser.name}!`);
+    showToast(role==='student'&&!userSaved
+      ?'Login berhasil, tetapi data akun tidak tersimpan di browser ini.'
+      :`Selamat datang, ${role==='admin'?currentAdminName:currentUser.name}!`);
   }
-  if(e.target.id==='report-form'){e.preventDefault();showModal('Kirim laporan sekarang?','Pastikan informasi dan lokasi kerusakan sudah benar. Laporan akan dikirim ke tim fasilitas untuk diverifikasi.','Ya, kirim laporan',()=>{const form=e.target;const submitButton=form.querySelector('button[type="submit"]');const originalLabel=submitButton?submitButton.innerHTML:'';if(submitButton){submitButton.disabled=true;submitButton.setAttribute('aria-busy','true');submitButton.innerHTML='<span class="loading-spinner" aria-hidden="true"></span> Mengirim...';}setTimeout(()=>{const title=form.querySelector('#report-title')?.value.trim()||form.querySelector('input[placeholder^="Contoh: Lampu"]').value.trim();const campusLoc=form.querySelector('#report-campus-location')?.value||'';const roomLoc=form.querySelector('#report-location-detail')?.value.trim()||form.querySelector('input[placeholder^="Contoh: Gedung"]').value.trim();const location=campusLoc?`${campusLoc} · ${roomLoc}`:roomLoc;const reporter=form.querySelector('#reporter-name').value.trim();const cat=form.querySelector('#report-category')?.value||form.querySelectorAll('select')[1].value;const lapMatches=reports.map(r=>Number(r.id.match(/^LAP-\d+-(\d+)$/)?.[1]||0));const nextId=(lapMatches.length?Math.max(84,...lapMatches):84)+1;const now=new Date();const dateStr=now.toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'});const newReport={id:`LAP-2026-${String(nextId).padStart(3,'0')}`,title,facility:cat,location,date:dateStr,status:'Menunggu Verifikasi',urgency:form.querySelector('input[name="urgency"]:checked')?.value||'Sedang',reporter,category:cat,description:form.querySelector('textarea').value.trim(),image:selectedImage,history:[{status:'Laporan dikirim',date:dateStr}]};reports.unshift(newReport);try{saveReports();}catch(error){reports.shift();if(submitButton){submitButton.disabled=false;submitButton.removeAttribute('aria-busy');submitButton.innerHTML=originalLabel;}showToast('Laporan belum dapat disimpan di browser. Coba lagi.');return;}selectedReport=newReport;currentUser.name=reporter;selectedImage=selectedReport.image||'';currentPage='detail';render(true);showToast('Laporan berhasil dikirim! Kami akan memberi kabar saat status diperbarui.');},250);});}
+  if(e.target.id==='report-form'){
+    e.preventDefault();
+    const form=e.target;
+    const reporterInput=form.querySelector('#reporter-name');
+    const reporter=(reporterInput?.value || '').trim();
+    const campusSelect=form.querySelector('#report-campus-location');
+    const campusLoc=campusSelect?.value || '';
+    const roomInput=form.querySelector('#report-location-detail') || form.querySelector('input[placeholder^="Contoh: Gedung"]');
+    const roomLoc=(roomInput?.value || '').trim();
+    const catSelect=form.querySelector('#report-category') || form.querySelectorAll('select')[1];
+    const cat=catSelect?.value || '';
+    const titleInput=form.querySelector('#report-title') || form.querySelector('input[placeholder^="Contoh: Lampu"]');
+    const title=(titleInput?.value || '').trim();
+    const descTextarea=form.querySelector('#report-description') || form.querySelector('textarea');
+    const descVal=(descTextarea?.value || '').trim();
+
+    if(!reporter){
+      showToast('Nama pelapor wajib diisi.');
+      reporterInput?.focus();
+      return;
+    }
+    if(!campusLoc){
+      showToast('Pilih lokasi kampus fasilitas.');
+      campusSelect?.focus();
+      return;
+    }
+    if(!roomLoc){
+      showToast('Gedung / ruangan wajib diisi.');
+      roomInput?.focus();
+      return;
+    }
+    if(!cat){
+      showToast('Pilih kategori fasilitas.');
+      catSelect?.focus();
+      return;
+    }
+    if(!title){
+      showToast('Nama fasilitas / jenis kerusakan wajib diisi.');
+      titleInput?.focus();
+      return;
+    }
+    if(!descVal){
+      showToast('Deskripsi kerusakan wajib diisi.');
+      descTextarea?.focus();
+      return;
+    }
+
+    showModal('Kirim laporan sekarang?','Pastikan informasi dan lokasi kerusakan sudah benar. Laporan akan dikirim ke tim fasilitas untuk diverifikasi.','Ya, kirim laporan',()=>{
+      const submitButton=form.querySelector('button[type="submit"]');
+      const originalLabel=submitButton?submitButton.innerHTML:'';
+      if(submitButton){
+        submitButton.disabled=true;
+        submitButton.setAttribute('aria-busy','true');
+        submitButton.innerHTML='<span class="loading-spinner" aria-hidden="true"></span> Mengirim...';
+      }
+      setTimeout(()=>{
+        const location=campusLoc?`${campusLoc} · ${roomLoc}`:roomLoc;
+        const lapMatches=reports.map(r=>Number(r.id.match(/^LAP-\d+-(\d+)$/)?.[1]||0));
+        const nextId=(lapMatches.length?Math.max(84,...lapMatches):84)+1;
+        const now=new Date();
+        const dateStr=now.toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'});
+        const newReport={
+          id:`LAP-2026-${String(nextId).padStart(3,'0')}`,
+          title,
+          facility:cat,
+          location,
+          date:dateStr,
+          status:'Menunggu Verifikasi',
+          urgency:form.querySelector('input[name="urgency"]:checked')?.value||'Sedang',
+          reporter,
+          category:cat,
+          description:descVal,
+          image:selectedImage,
+          history:[{status:'Laporan dikirim',date:dateStr}]
+        };
+        reports.unshift(newReport);
+        try{
+          saveReports();
+        }catch(error){
+          reports.shift();
+          if(submitButton){
+            submitButton.disabled=false;
+            submitButton.removeAttribute('aria-busy');
+            submitButton.innerHTML=originalLabel;
+          }
+          showToast('Laporan belum dapat disimpan di browser. Coba lagi.');
+          return;
+        }
+        selectedReport=newReport;
+        currentUser.name=reporter;
+        selectedImage=selectedReport.image||'';
+        currentPage='detail';
+        render(true);
+        showToast('Laporan berhasil dikirim! Kami akan memberi kabar saat status diperbarui.');
+      },250);
+    });
+  }
 });
 document.addEventListener('click',e=>{if(e.target.closest('[data-page="create"]')&&currentPage==='create')return;});
 window.addEventListener('popstate',()=>{
   if(history.state?.role==='student'||history.state?.role==='admin')role=history.state.role;
   const route=location.hash.match(/^#\/track\/(.+)$/);
   if(route){
-    const report=reports.find(item=>item.id===decodeURIComponent(route[1]));
+    let report;
+    try {
+      const reportId=decodeURIComponent(route[1]);
+      report=reports.find(item=>item.id===reportId);
+    } catch(error) {
+      console.warn('ID tiket pada URL tidak valid.',error);
+    }
     if(report){selectedReport=report;selectedImage=report.image||'';currentPage='track';}
     else currentPage='landing';
   }else if(location.hash==='#/report')currentPage='report';
@@ -657,8 +938,15 @@ window.addEventListener('popstate',()=>{
 });
 const initialTrack=location.hash.match(/^#\/track\/(.+)$/);
 if(initialTrack){
-  const report=reports.find(item=>item.id===decodeURIComponent(initialTrack[1]));
+  let report;
+  try {
+    const reportId=decodeURIComponent(initialTrack[1]);
+    report=reports.find(item=>item.id===reportId);
+  } catch(error) {
+    console.warn('ID tiket pada URL tidak valid.',error);
+  }
   if(report){selectedReport=report;selectedImage=report.image||'';currentPage='track';}
 }else if(location.hash==='#/report')currentPage='report';
 if(!history.state?.page)history.replaceState({page:currentPage,role},'',location.href);
 render();
+if(storageWarning)showToast('Sebagian data browser tidak dapat dibaca atau disimpan. Aplikasi tetap dapat digunakan, tetapi perubahan mungkin tidak tersimpan.');
