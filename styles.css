@@ -763,3 +763,100 @@ h1, h2, h3, .brand-name, .top-title, .stat-value { font-family: ui-sans-serif, s
   .login-form-wrap { padding: 24px 20px; }
   .public-header { min-height: 64px; }
 }
+
+/* Warm color accents and tactile micro-interactions */
+:root {
+  --maroon: #ea580c;
+  --maroon-dark: #c2410c;
+  --maroon-soft: #ffedd5;
+  --ink: #0f172a;
+  --muted: #64748b;
+  --line: #e7e5e4;
+  --canvas: #fff8f0;
+  --green: #3f6212;
+  --green-soft: #ecfccb;
+  --amber: #92400e;
+  --amber-soft: #fef3c7;
+  --blue: #0e7490;
+  --blue-soft: #cffafe;
+}
+body, .public-site, .shell, .login-screen { background-color: #fff8f0; }
+.btn, .icon-button, .nav-item, .public-report-card, .report-row,
+.priority-item, .notification-item, .public-upload, .category-tag {
+  transition: color .2s ease-in-out, background-color .2s ease-in-out,
+    border-color .2s ease-in-out, box-shadow .2s ease-in-out,
+    transform .15s ease-in-out;
+}
+.btn:not(:disabled):hover, .icon-button:not(:disabled):hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 10px rgba(15,23,42,.12);
+}
+.btn:not(:disabled):active, .icon-button:not(:disabled):active {
+  transform: scale(.95);
+  transition-duration: .15s;
+}
+.btn:disabled { cursor: wait; opacity: .8; }
+.btn-primary, .shell .btn-primary { background: #ea580c; border-color: #ea580c; }
+.btn-primary:hover, .shell .btn-primary:hover { background: #c2410c; border-color: #c2410c; }
+.btn-outline:hover { background: #fff1e7; border-color: #ea580c; }
+.nav-item:active { transform: scale(.97); }
+.public-report-card:hover, .public-report-card:focus-visible {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(15,23,42,.1);
+}
+.public-report-card:active { transform: scale(.99); }
+.public-status { transition: transform .2s ease-in-out, box-shadow .2s ease-in-out; }
+.public-report-card:hover .public-status { transform: scale(1.04); box-shadow: 0 1px 3px rgba(15,23,42,.1); }
+.public-status.waiting { color: #92400e; background: #fef3c7; border-color: #fde68a; }
+.public-status.processing, .public-status.repair { color: #0e7490; background: #cffafe; border-color: #a5f3fc; }
+.public-status.done { color: #3f6212; background: #ecfccb; border-color: #bef264; }
+.public-status.rejected { color: #991b1b; background: #fee2e2; border-color: #fecaca; }
+.public-form-card .control:focus, .control:focus { border-color: #ea580c; box-shadow: 0 0 0 3px rgba(234,88,12,.16); }
+.hero-kicker, .section-kicker, .form-step { color: #c2410c; }
+.hero-kicker svg, .hero-promise svg, .feed-footnote svg, .track-notice svg,
+.public-upload > svg { color: #ea580c; }
+.status-card-icon, .stat-icon { color: #c2410c; background: #ffedd5; }
+.stat-icon.green { color: #3f6212; background: #ecfccb; }
+.stat-icon.blue { color: #0e7490; background: #cffafe; }
+.stat-icon.amber { color: #92400e; background: #fef3c7; }
+.chart-bar { background: rgba(234,88,12,.68); }
+.legend-dot { background: #ea580c; }
+.history-dot, .notification-item .unread-dot { background: #ea580c; }
+.loading-spinner {
+  width: 16px;
+  height: 16px;
+  display: inline-block;
+  border: 2px solid rgba(255,255,255,.45);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: report-submit-spin .7s linear infinite;
+}
+@keyframes report-submit-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+.page-enter { animation: page-enter .28s cubic-bezier(.2,.7,.25,1) both; }
+@keyframes page-enter {
+  from { opacity: 0; transform: translateY(9px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.topbar .icon-button.active {
+  color: #fff;
+  background: #ea580c;
+  border-color: #ea580c;
+  box-shadow: 0 0 0 3px rgba(234,88,12,.2);
+}
+.topbar .icon-button[data-page="notifications"]:hover svg { animation: notification-wiggle .38s ease-in-out; }
+.topbar .icon-button[data-page="notifications"].active svg { animation: notification-pop .28s ease-out; }
+.nav-item[data-page="notifications"]:hover svg,
+.nav-item[data-page="notifications"].active svg { animation: notification-pop .28s ease-out; }
+@keyframes notification-wiggle {
+  0%, 100% { transform: rotate(0); }
+  25% { transform: rotate(-12deg); }
+  65% { transform: rotate(10deg); }
+}
+@keyframes notification-pop {
+  0% { transform: scale(.8); }
+  65% { transform: scale(1.16); }
+  100% { transform: scale(1); }
+}

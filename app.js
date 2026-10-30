@@ -55,7 +55,7 @@ try {
 } catch (error) {
   console.error('Data laporan tidak dapat dibaca dari penyimpanan browser.', error);
 }
-let currentPage = 'landing';
+let currentPage = 'login';
 let role = 'student';
 let currentAdminName = 'Admin';
 let selectedReport = reports[0];
@@ -106,11 +106,11 @@ function updateReportStatus(report, status, urgencyValue = report.urgency) {
 function setPage(page) {
   currentPage = page;
   if (page === 'track' && selectedReport) {
-    history.pushState({ page, reportId:selectedReport.id }, '', `#/track/${encodeURIComponent(selectedReport.id)}`);
+    history.pushState({ page, role, reportId:selectedReport.id }, '', `#/track/${encodeURIComponent(selectedReport.id)}`);
   } else {
-    history.pushState({ page }, '', page === 'landing' ? `${location.pathname}${location.search}` : `#/${page}`);
+    history.pushState({ page, role }, '', page === 'landing' ? `${location.pathname}${location.search}` : `#/${page}`);
   }
-  render();
+  render(true);
 }
 function compressImageFile(file) {
   return new Promise((resolve, reject) => {
@@ -173,7 +173,7 @@ function sidebar() {
     <div class="nav-label">${admin ? 'MENU PENGELOLA' : 'MENU UTAMA'}</div>
     <nav class="nav-list">
       ${admin ? `${navButton('adminHome','home','Ringkasan')}${navButton('manage','list','Manajemen Laporan',currentPage==='manage'||currentPage==='handling','<span class="nav-badge">8</span>')}` :
-      `${navButton('home','home','Beranda')}${navButton('create','plus','Buat Laporan')}${navButton('mine','list','Laporan Saya')}${navButton('notifications','bell','Notifikasi',false,'<span class="nav-badge">2</span>')}${navButton('profile','user','Profil')}`}
+      `${navButton('home','home','Beranda')}${navButton('create','plus','Buat Laporan')}${navButton('mine','list','Laporan Saya')}${navButton('notifications','bell','Notifikasi',currentPage==='notifications','<span class="nav-badge">2</span>')}${navButton('profile','user','Profil')}`}
     </nav>
     ${admin ? '<div class="nav-label" style="margin-top:29px">PREFERENSI</div><nav class="nav-list">'+navButton('notifications','bell','Notifikasi')+'</nav>' : ''}
     <div class="sidebar-bottom">
@@ -185,7 +185,7 @@ function sidebar() {
 }
 function topbar() {
   const title = pageMeta[currentPage]?.[0] || 'Beranda';
-  return `<header class="topbar"><div class="topbar-left"><button class="icon-button mobile-menu" data-action="menu" aria-label="Buka menu">${I('menu')}</button><div><div class="eyebrow">Universitas Nusantara</div><div class="top-title">${title}</div></div></div><div class="topbar-right"><button class="icon-button" data-page="notifications" aria-label="Notifikasi">${I('bell')}<span class="notification-dot"></span></button><div class="top-user"><div class="avatar ${role==='admin'?'admin':''}">${role==='admin'?userInitials(currentAdminName):userInitials(currentUser.name)}</div><div class="user-copy"><strong>${role==='admin'?escapeHTML(currentAdminName):escapeHTML(currentUser.name)}</strong><small>${role==='admin'?'Admin':'Mahasiswa'}</small></div></div></div></header>`;
+  return `<header class="topbar"><div class="topbar-left"><button class="icon-button mobile-menu" data-action="menu" aria-label="Buka menu">${I('menu')}</button><div><div class="eyebrow">Universitas Nusantara</div><div class="top-title">${title}</div></div></div><div class="topbar-right"><button class="icon-button ${currentPage==='notifications'?'active':''}" data-page="notifications" aria-label="Notifikasi" ${currentPage==='notifications'?'aria-current="page"':''}>${I('bell')}<span class="notification-dot"></span></button><div class="top-user"><div class="avatar ${role==='admin'?'admin':''}">${role==='admin'?userInitials(currentAdminName):userInitials(currentUser.name)}</div><div class="user-copy"><strong>${role==='admin'?escapeHTML(currentAdminName):escapeHTML(currentUser.name)}</strong><small>${role==='admin'?'Admin':'Mahasiswa'}</small></div></div></div></header>`;
 }
 function heading(title, desc, button = '') {
   return `<div class="page-heading"><div><h1>${title}</h1><p>${desc}</p></div>${button}</div>`;
@@ -379,7 +379,7 @@ function loginPage(adminMode = false) {
     </div></section>
   </div>`;
 }
-function render() {
+function render(animate = false) {
   const pages = { home:studentHome, create:createReport, mine:myReports, detail:detailPage, notifications:notificationsPage, adminHome, manage:managementPage, handling:handlingPage, profile:profilePage };
   const publicPages = { landing:landingPage, report:publicReportForm, track:trackingPage };
   document.getElementById('app').innerHTML = currentPage === 'login'
@@ -387,6 +387,10 @@ function render() {
     : publicPages[currentPage]
       ? publicPages[currentPage]()
       : shell(pages[currentPage]());
+  if(animate){
+    const page=document.querySelector('.content, .public-main, .public-form-page, .public-track-page, .login-form-wrap');
+    page?.classList.add('page-enter');
+  }
 }
 function showToast(message) {
   const region = document.getElementById('toast-region');
@@ -408,7 +412,7 @@ function openReport(id, admin = false) {
   selectedReport = reports.find(r=>r.id===id) || reports[0];
   selectedImage = selectedReport.image || '';
   currentPage = admin ? 'handling' : 'detail';
-  render();
+  render(true);
 }
 function applyMineFilters() {
   const query = (document.getElementById('report-search')?.value || '').toLowerCase();
@@ -439,7 +443,7 @@ document.addEventListener('click', e => {
   const action=e.target.closest('[data-action]')?.dataset.action;
   if(!action)return;
   if(action==='menu')document.getElementById('sidebar')?.classList.toggle('open');
-  if(action==='logout'){role='student';setPage('landing');}
+  if(action==='logout'){role='student';setPage('login');}
   if(action==='admin-login'){e.preventDefault();role='admin';setPage('login');}
   if(action==='student-login'){role='student';setPage('login');}
   if(action==='focus-ticket'){const search=document.querySelector('.ticket-search');search?.classList.add('search-open','search-focused');search?.scrollIntoView({behavior:'smooth',block:'center'});document.getElementById('ticket-id')?.focus();}
@@ -460,7 +464,7 @@ document.addEventListener('click', e => {
   if(action==='update-report'){
     try {
       const statusChanged=updateReportStatus(selectedReport,document.getElementById('handling-status').value,document.getElementById('handling-priority').value);
-      render();
+      render(true);
       showToast(statusChanged?'Status laporan berhasil diperbarui.':'Perubahan laporan berhasil disimpan.');
     } catch(error) {
       showToast(error.message);
@@ -473,7 +477,7 @@ document.addEventListener('click', e => {
     const previousName=currentUser.name;
     reports.forEach(report=>{if(report.reporter===previousName)report.reporter=name;});
     currentUser={...currentUser,name,npm,email:document.getElementById('profile-email').value.trim()};
-    render();
+    render(true);
     showToast('Nama dan NPM berhasil diperbarui.');
   }
 });
@@ -573,34 +577,49 @@ document.addEventListener('submit',e=>{
     e.preventDefault();
     const form=e.target;
     showModal('Kirim laporan sekarang?','Pastikan lokasi dan deskripsi sudah sesuai. Setelah dikirim, simpan ID tiket untuk memantau progresnya.','Ya, kirim laporan',()=>{
-      const category=form.querySelector('#public-category').value;
-      const building=form.querySelector('#public-building').value;
-      const details=form.querySelector('#public-location').value.trim();
-      const reporter=form.querySelector('#anonymous-report').checked?'Anonim':form.querySelector('#public-reporter').value.trim();
-      const ticketNumber=Math.max(8920,...reports.map(report=>Number(report.id.match(/^RLF-(\d+)$/)?.[1]||0)))+1;
-      const createdAt=new Date();
-      const newReport={
-        id:`RLF-${ticketNumber}`,
-        title:form.querySelector('#public-title').value.trim(),
-        facility:category,
-        category,
-        location:`${building} · ${details}`,
-        date:createdAt.toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'}),
-        timeAgo:'Baru saja',
-        status:'Menunggu Verifikasi',
-        urgency:'Sedang',
-        reporter,
-        anonymous:form.querySelector('#anonymous-report').checked,
-        description:form.querySelector('#public-description').value.trim(),
-        image:selectedImage,
-        history:[{status:'Laporan Diterima',date:createdAt.toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})}]
-      };
-      reports.unshift(newReport);
-      try{saveReports();}catch(error){reports.shift();showToast('Laporan belum dapat disimpan di browser ini.');return;}
-      selectedReport=newReport;
-      selectedImage=newReport.image||'';
-      setPage('track');
-      showToast(`Laporan terkirim. Simpan tiket #${newReport.id} untuk melacaknya.`);
+      const submitButton=form.querySelector('button[type="submit"]');
+      const originalLabel=submitButton.innerHTML;
+      submitButton.disabled=true;
+      submitButton.setAttribute('aria-busy','true');
+      submitButton.innerHTML='<span class="loading-spinner" aria-hidden="true"></span> Mengirim...';
+      setTimeout(()=>{
+        const category=form.querySelector('#public-category').value;
+        const building=form.querySelector('#public-building').value;
+        const details=form.querySelector('#public-location').value.trim();
+        const anonymous=form.querySelector('#anonymous-report').checked;
+        const reporter=anonymous?'Anonim':form.querySelector('#public-reporter').value.trim();
+        const ticketNumber=Math.max(8920,...reports.map(report=>Number(report.id.match(/^RLF-(\d+)$/)?.[1]||0)))+1;
+        const createdAt=new Date();
+        const newReport={
+          id:`RLF-${ticketNumber}`,
+          title:form.querySelector('#public-title').value.trim(),
+          facility:category,
+          category,
+          location:`${building} · ${details}`,
+          date:createdAt.toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'}),
+          timeAgo:'Baru saja',
+          status:'Menunggu Verifikasi',
+          urgency:'Sedang',
+          reporter,
+          anonymous,
+          description:form.querySelector('#public-description').value.trim(),
+          image:selectedImage,
+          history:[{status:'Laporan Diterima',date:createdAt.toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})}]
+        };
+        reports.unshift(newReport);
+        try{saveReports();}catch(error){
+          reports.shift();
+          submitButton.disabled=false;
+          submitButton.removeAttribute('aria-busy');
+          submitButton.innerHTML=originalLabel;
+          showToast('Laporan belum dapat disimpan di browser ini.');
+          return;
+        }
+        selectedReport=newReport;
+        selectedImage=newReport.image||'';
+        setPage('track');
+        showToast(`Laporan terkirim. Simpan tiket #${newReport.id} untuk melacaknya.`);
+      },250);
     });
     return;
   }
@@ -616,13 +635,14 @@ document.addEventListener('submit',e=>{
       currentUser={...currentUser,name,npm,email};
     }
     currentPage=role==='admin'?'adminHome':'home';
-    render();
+    render(true);
     showToast(`Selamat datang, ${role==='admin'?currentAdminName:currentUser.name}!`);
   }
   if(e.target.id==='report-form'){e.preventDefault();showModal('Kirim laporan sekarang?','Pastikan informasi dan lokasi kerusakan sudah benar. Laporan akan dikirim ke tim fasilitas untuk diverifikasi.','Ya, kirim laporan',()=>{const form=e.target;const title=form.querySelector('input[placeholder^="Contoh: Lampu"]').value.trim();const location=form.querySelector('input[placeholder^="Contoh: Gedung"]').value.trim();const reporter=form.querySelector('#reporter-name').value.trim();const cat=form.querySelectorAll('select')[1].value;const nextId=Math.max(...reports.map(report=>Number(report.id.slice(report.id.lastIndexOf('-')+1))))+1;const newReport={id:`LAP-2026-${String(nextId).padStart(3,'0')}`,title,facility:cat,location,date:'28 Okt 2026',status:'Menunggu Verifikasi',urgency:form.querySelector('input[name="urgency"]:checked')?.value||'Sedang',reporter,category:cat,description:form.querySelector('textarea').value.trim(),image:selectedImage,history:[{status:'Laporan dikirim',date:'28 Okt 2026'}]};reports.unshift(newReport);try{saveReports();}catch(error){reports.shift();showToast('Laporan belum dapat disimpan di browser. Coba lagi.');return;}selectedReport=newReport;currentUser.name=reporter;selectedImage=selectedReport.image||'';currentPage='detail';render();showToast('Laporan berhasil dikirim! Kami akan memberi kabar saat status diperbarui.');});}
 });
 document.addEventListener('click',e=>{if(e.target.closest('[data-page="create"]')&&currentPage==='create')return;});
 window.addEventListener('popstate',()=>{
+  if(history.state?.role==='student'||history.state?.role==='admin')role=history.state.role;
   const route=location.hash.match(/^#\/track\/(.+)$/);
   if(route){
     const report=reports.find(item=>item.id===decodeURIComponent(route[1]));
@@ -631,12 +651,13 @@ window.addEventListener('popstate',()=>{
   }else if(location.hash==='#/report')currentPage='report';
   else if(['home','create','mine','detail','notifications','adminHome','manage','handling','profile','login'].includes(history.state?.page)){
     currentPage=history.state.page;
-  }else currentPage='landing';
-  render();
+  }else currentPage='login';
+  render(true);
 });
 const initialTrack=location.hash.match(/^#\/track\/(.+)$/);
 if(initialTrack){
   const report=reports.find(item=>item.id===decodeURIComponent(initialTrack[1]));
   if(report){selectedReport=report;selectedImage=report.image||'';currentPage='track';}
 }else if(location.hash==='#/report')currentPage='report';
+if(!history.state?.page)history.replaceState({page:currentPage,role},'',location.href);
 render();
