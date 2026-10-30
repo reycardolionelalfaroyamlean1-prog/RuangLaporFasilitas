@@ -288,11 +288,11 @@ function createReport() {
     <div class="form-layout"><form class="form-card" id="report-form"><div class="form-section-title"><span class="step-number">1</span> Informasi Fasilitas</div>
       <div class="form-grid">
         <div class="field"><label>Nama pelapor <span class="required">*</span></label><input class="control" id="reporter-name" required value="${escapeHTML(currentUser.name)}" placeholder="Nama lengkap"></div>
-        <div class="field"><label>Lokasi fasilitas <span class="required">*</span></label><select class="control" required><option value="">Pilih lokasi kampus</option><option>Area Kampus Utama</option><option>Area Kampus Barat</option><option>Area Kampus Timur</option></select></div>
-        <div class="field"><label>Gedung / ruangan <span class="required">*</span></label><input class="control" required placeholder="Contoh: Gedung A, Ruang 204"></div>
-        <div class="field"><label>Kategori fasilitas <span class="required">*</span></label><select class="control" required><option value="">Pilih kategori</option><option>Kelistrikan</option><option>Furnitur</option><option>Plumbing</option><option>Elektronik</option><option>Bangunan</option><option>Area luar</option></select></div>
-        <div class="field full"><label>Nama fasilitas / jenis kerusakan <span class="required">*</span></label><input class="control" required placeholder="Contoh: Lampu koridor mati"></div>
-        <div class="field full"><label>Deskripsi kerusakan <span class="required">*</span></label><textarea class="control" required placeholder="Ceritakan kondisi kerusakan, sejak kapan terjadi, dan informasi lain yang membantu..."></textarea><span class="helper">Jelaskan lokasi spesifik dan kondisi kerusakan dengan singkat.</span></div>
+        <div class="field"><label>Lokasi fasilitas <span class="required">*</span></label><select class="control" id="report-campus-location" required><option value="">Pilih lokasi kampus</option><option>Area Kampus Utama</option><option>Area Kampus Barat</option><option>Area Kampus Timur</option></select></div>
+        <div class="field"><label>Gedung / ruangan <span class="required">*</span></label><input class="control" id="report-location-detail" required placeholder="Contoh: Gedung A, Ruang 204"></div>
+        <div class="field"><label>Kategori fasilitas <span class="required">*</span></label><select class="control" id="report-category" required><option value="">Pilih kategori</option><option>Kelistrikan</option><option>Furnitur</option><option>Plumbing</option><option>Elektronik</option><option>Bangunan</option><option>Area luar</option></select></div>
+        <div class="field full"><label>Nama fasilitas / jenis kerusakan <span class="required">*</span></label><input class="control" id="report-title" required placeholder="Contoh: Lampu koridor mati"></div>
+        <div class="field full"><label>Deskripsi kerusakan <span class="required">*</span></label><textarea class="control" id="report-description" required placeholder="Ceritakan kondisi kerusakan, sejak kapan terjadi, dan informasi lain yang membantu..."></textarea><span class="helper">Jelaskan lokasi spesifik dan kondisi kerusakan dengan singkat.</span></div>
         <div class="field full"><label>Foto kerusakan</label><label class="upload-box" for="photo-input"><div>${I('upload')}<strong id="upload-label">Klik untuk unggah atau tarik foto ke sini</strong><small>JPG atau PNG · Maksimal 5 MB</small></div><input id="photo-input" type="file" accept="image/*" hidden></label><span class="helper">Foto membantu pihak pengelola memverifikasi kondisi fasilitas dengan lebih cepat.</span></div>
         <div class="field full"><label>Tingkat urgensi <span class="required">*</span></label><div class="urgency-options"><label class="urgency-option"><input type="radio" name="urgency" value="Rendah"><span>Rendah</span></label><label class="urgency-option"><input type="radio" name="urgency" value="Sedang" checked><span>Sedang</span></label><label class="urgency-option"><input type="radio" name="urgency" value="Tinggi"><span>Tinggi</span></label></div></div>
       </div><div class="form-actions"><button type="button" class="btn btn-outline" data-page="home">Batal</button><button type="submit" class="btn btn-primary">${I('arrow')} Kirim Laporan</button></div></form>
@@ -356,7 +356,7 @@ function profilePage() {
   return `${heading('Profil Saya','Kelola informasi akun Anda.') }<div class="form-layout"><section class="form-card"><div class="form-section-title"><span class="step-number">${I('user',13)}</span> Informasi Akun</div><div class="form-grid"><div class="field"><label>Nama lengkap</label><input class="control" id="profile-name" value="${escapeHTML(currentUser.name)}" required></div><div class="field"><label>NPM</label><input class="control" id="profile-npm" value="${escapeHTML(currentUser.npm)}" required></div><div class="field"><label>Email kampus</label><input class="control" id="profile-email" type="email" value="${escapeHTML(currentUser.email)}"></div><div class="field"><label>Program studi</label><input class="control" value="Teknik Informatika"></div><div class="field"><label>Fakultas</label><input class="control" value="Teknik"></div><div class="field"><label>Angkatan</label><input class="control" value="2025"></div></div><div class="form-actions"><button class="btn btn-primary" data-action="save-profile">${I('check')} Simpan Perubahan</button></div></section><aside class="info-aside"><div class="info-box"><div class="avatar" id="profile-avatar" style="width:54px;height:54px;font-size:17px;margin-bottom:12px">${userInitials(currentUser.name)}</div><h3 id="profile-preview-name">${escapeHTML(currentUser.name)}</h3><p>Mahasiswa · Teknik Sipil<br>Universitas Nusantara</p></div></aside></div>`;
 }
 function shell(pageContent) {
-  return `<div class="shell">${sidebar()}<main class="main-area">${topbar()}<div class="content">${pageContent}</div></main></div>`;
+  return `<div class="shell">${sidebar()}<div class="sidebar-overlay" id="sidebar-overlay" data-action="close-sidebar"></div><main class="main-area">${topbar()}<div class="content">${pageContent}</div></main></div>`;
 }
 function loginPage(adminMode = false) {
   return `<div class="login-screen">
@@ -437,12 +437,13 @@ document.addEventListener('click', e => {
     return;
   }
   const pageButton=e.target.closest('[data-page]');
-  if(pageButton){e.preventDefault();setPage(pageButton.dataset.page);return;}
+  if(pageButton){e.preventDefault();document.getElementById('sidebar')?.classList.remove('open');document.getElementById('sidebar-overlay')?.classList.remove('active');setPage(pageButton.dataset.page);return;}
   const reportButton=e.target.closest('[data-report]');
   if(reportButton){openReport(reportButton.dataset.report,role==='admin');return;}
   const action=e.target.closest('[data-action]')?.dataset.action;
   if(!action)return;
-  if(action==='menu')document.getElementById('sidebar')?.classList.toggle('open');
+  if(action==='menu'){document.getElementById('sidebar')?.classList.toggle('open');document.getElementById('sidebar-overlay')?.classList.toggle('active');}
+  if(action==='close-sidebar'){document.getElementById('sidebar')?.classList.remove('open');document.getElementById('sidebar-overlay')?.classList.remove('active');}
   if(action==='logout'){role='student';setPage('login');}
   if(action==='admin-login'){e.preventDefault();role='admin';setPage('login');}
   if(action==='student-login'){role='student';setPage('login');}
@@ -518,8 +519,8 @@ document.addEventListener('change',e=>{
     const file=e.target.files[0];
     if(file){
       if(file.size>5*1024*1024){showToast('Ukuran foto maksimal 5 MB.');e.target.value='';return;}
-      selectedImage=URL.createObjectURL(file);
-      document.getElementById('upload-label').textContent=file.name;
+      compressImageFile(file).then(imageData=>{ selectedImage=imageData; document.getElementById('upload-label').textContent=file.name; }).catch(err=>{ showToast(err.message); e.target.value=''; });
+
     }
   }
   if(e.target.id==='public-photo-input'){
@@ -638,7 +639,7 @@ document.addEventListener('submit',e=>{
     render(true);
     showToast(`Selamat datang, ${role==='admin'?currentAdminName:currentUser.name}!`);
   }
-  if(e.target.id==='report-form'){e.preventDefault();showModal('Kirim laporan sekarang?','Pastikan informasi dan lokasi kerusakan sudah benar. Laporan akan dikirim ke tim fasilitas untuk diverifikasi.','Ya, kirim laporan',()=>{const form=e.target;const title=form.querySelector('input[placeholder^="Contoh: Lampu"]').value.trim();const location=form.querySelector('input[placeholder^="Contoh: Gedung"]').value.trim();const reporter=form.querySelector('#reporter-name').value.trim();const cat=form.querySelectorAll('select')[1].value;const nextId=Math.max(...reports.map(report=>Number(report.id.slice(report.id.lastIndexOf('-')+1))))+1;const newReport={id:`LAP-2026-${String(nextId).padStart(3,'0')}`,title,facility:cat,location,date:'28 Okt 2026',status:'Menunggu Verifikasi',urgency:form.querySelector('input[name="urgency"]:checked')?.value||'Sedang',reporter,category:cat,description:form.querySelector('textarea').value.trim(),image:selectedImage,history:[{status:'Laporan dikirim',date:'28 Okt 2026'}]};reports.unshift(newReport);try{saveReports();}catch(error){reports.shift();showToast('Laporan belum dapat disimpan di browser. Coba lagi.');return;}selectedReport=newReport;currentUser.name=reporter;selectedImage=selectedReport.image||'';currentPage='detail';render();showToast('Laporan berhasil dikirim! Kami akan memberi kabar saat status diperbarui.');});}
+  if(e.target.id==='report-form'){e.preventDefault();showModal('Kirim laporan sekarang?','Pastikan informasi dan lokasi kerusakan sudah benar. Laporan akan dikirim ke tim fasilitas untuk diverifikasi.','Ya, kirim laporan',()=>{const form=e.target;const submitButton=form.querySelector('button[type="submit"]');const originalLabel=submitButton?submitButton.innerHTML:'';if(submitButton){submitButton.disabled=true;submitButton.setAttribute('aria-busy','true');submitButton.innerHTML='<span class="loading-spinner" aria-hidden="true"></span> Mengirim...';}setTimeout(()=>{const title=form.querySelector('#report-title')?.value.trim()||form.querySelector('input[placeholder^="Contoh: Lampu"]').value.trim();const campusLoc=form.querySelector('#report-campus-location')?.value||'';const roomLoc=form.querySelector('#report-location-detail')?.value.trim()||form.querySelector('input[placeholder^="Contoh: Gedung"]').value.trim();const location=campusLoc?`${campusLoc} · ${roomLoc}`:roomLoc;const reporter=form.querySelector('#reporter-name').value.trim();const cat=form.querySelector('#report-category')?.value||form.querySelectorAll('select')[1].value;const lapMatches=reports.map(r=>Number(r.id.match(/^LAP-\d+-(\d+)$/)?.[1]||0));const nextId=(lapMatches.length?Math.max(84,...lapMatches):84)+1;const now=new Date();const dateStr=now.toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'});const newReport={id:`LAP-2026-${String(nextId).padStart(3,'0')}`,title,facility:cat,location,date:dateStr,status:'Menunggu Verifikasi',urgency:form.querySelector('input[name="urgency"]:checked')?.value||'Sedang',reporter,category:cat,description:form.querySelector('textarea').value.trim(),image:selectedImage,history:[{status:'Laporan dikirim',date:dateStr}]};reports.unshift(newReport);try{saveReports();}catch(error){reports.shift();if(submitButton){submitButton.disabled=false;submitButton.removeAttribute('aria-busy');submitButton.innerHTML=originalLabel;}showToast('Laporan belum dapat disimpan di browser. Coba lagi.');return;}selectedReport=newReport;currentUser.name=reporter;selectedImage=selectedReport.image||'';currentPage='detail';render(true);showToast('Laporan berhasil dikirim! Kami akan memberi kabar saat status diperbarui.');},250);});}
 });
 document.addEventListener('click',e=>{if(e.target.closest('[data-page="create"]')&&currentPage==='create')return;});
 window.addEventListener('popstate',()=>{
