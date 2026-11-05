@@ -66,6 +66,10 @@ function normalizeReport(report) {
     ? report.history.filter(entry => entry && typeof entry.status === 'string' && typeof entry.date === 'string')
       .map(entry => ({ status: entry.status, date: entry.date }))
     : [];
+  const handlingNotes = Array.isArray(report.handlingNotes)
+    ? report.handlingNotes.filter(entry => entry && typeof entry.note === 'string' && typeof entry.date === 'string')
+      .map(entry => ({ note: entry.note, date: entry.date }))
+    : [];
   return {
     ...report,
     image: typeof report.image === 'string' ? report.image : '',
@@ -73,6 +77,10 @@ function normalizeReport(report) {
     urgency: ['Rendah','Sedang','Tinggi'].includes(report.urgency) ? report.urgency : 'Sedang',
     status: reportStatuses.includes(report.status) ? report.status : 'Menunggu Verifikasi',
     history,
+    handlingNotes,
+    assignedTo: typeof report.assignedTo === 'string' ? report.assignedTo : 'Belum ditentukan',
+    repairStartedAt: typeof report.repairStartedAt === 'string' ? report.repairStartedAt : '',
+    repairCompletedAt: typeof report.repairCompletedAt === 'string' ? report.repairCompletedAt : '',
   };
 }
 function loadReports(saved) {
@@ -139,7 +147,20 @@ function saveReports() {
     throw new Error('Perubahan laporan tidak dapat disimpan di browser ini.');
   }
 }
-function updateReportStatus(report, status, urgencyValue = report.urgency) {
+function persistReportUpdate(report, updates) {
+  const previous = { ...report };
+  Object.assign(report, updates);
+  try {
+    saveReports();
+  } catch (error) {
+    for (const key of Object.keys(report)) {
+      if (!Object.prototype.hasOwnProperty.call(previous, key)) delete report[key];
+    }
+    Object.assign(report, previous);
+    throw error;
+  }
+}
+function updateReportStatus(report, status, urgencyValue = report.urgency, handlingUpdates = {}) {
   if (!reportStatuses.includes(status)) {
     throw new Error(`Status laporan tidak dikenal: ${status}`);
   }
@@ -147,30 +168,22 @@ function updateReportStatus(report, status, urgencyValue = report.urgency) {
     throw new Error(`Prioritas laporan tidak dikenal: ${urgencyValue}`);
   }
   const statusChanged = report.status !== status;
-  if (!statusChanged && report.urgency === urgencyValue) return false;
-  const previousStatus = report.status;
-  const previousUrgency = report.urgency;
-  const previousHistory = report.history;
-  report.status = status;
-  report.urgency = urgencyValue;
+  const urgencyChanged = report.urgency !== urgencyValue;
+  const handlingChanged = Object.keys(handlingUpdates).some(key => report[key] !== handlingUpdates[key]);
+  if (!statusChanged && !urgencyChanged && !handlingChanged) return false;
+  const updates = { ...handlingUpdates, status, urgency:urgencyValue };
   if (statusChanged) {
-    report.history = [...(report.history || []), {
+    updates.history = [...(report.history || []), {
       status,
       date: new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' }),
     }];
   }
-  try {
-    saveReports();
-  } catch (error) {
-    report.status = previousStatus;
-    report.urgency = previousUrgency;
-    report.history = previousHistory;
-    throw new Error('Perubahan status tidak dapat disimpan di browser.', { cause: error });
-  }
-  return statusChanged;
+  persistReportUpdate(report, updates);
+  return true;
 }
 function setPage(page) {
   currentPage = page;
+  if (page === 'create' || page === 'report') selectedImage = '';
   if (page === 'track' && selectedReport) {
     history.pushState({ page, role, reportId:selectedReport.id }, '', `#/track/${encodeURIComponent(selectedReport.id)}`);
   } else {
@@ -333,9 +346,10 @@ function trackingPage() {
   const report=selectedReport;
   const state=['Menunggu Verifikasi','Diproses','Sedang Diperbaiki','Selesai'].includes(report.status)?report.status:'Ditolak';
   const activeIndex=state==='Menunggu Verifikasi'?1:state==='Diproses'?2:state==='Sedang Diperbaiki'?3:state==='Selesai'?4:1;
+  const verified=['Diproses','Sedang Diperbaiki','Selesai'].includes(report.status);
   const timeline=[
     {title:'Laporan Diterima',detail:'Laporan berhasil masuk ke sistem.',status:'done'},
-    {title:'Diverifikasi Admin',detail:report.history?.some(item=>item.status==='Diproses')?'Laporan valid, diteruskan ke tim teknis.':'Menunggu pemeriksaan oleh pengelola.',status:activeIndex>1?'done':activeIndex===1?'active':'pending'},
+    {title:'Diverifikasi Admin',detail:report.status==='Ditolak'?'Laporan ditolak oleh pengelola.':verified?'Laporan valid, diteruskan ke tim teknis.':'Menunggu pemeriksaan oleh pengelola.',status:activeIndex>1?'done':activeIndex===1?'active':'pending'},
     {title:'Petugas Ditugaskan',detail:state==='Sedang Diperbaiki'||state==='Selesai'?'Petugas: Tim Fasilitas Kampus':'Petugas akan ditugaskan setelah laporan diverifikasi.',status:activeIndex>2?'done':activeIndex===2?'active':'pending'},
     {title:'Perbaikan Selesai',detail:state==='Selesai'?'Penanganan laporan telah selesai.':'Bukti perbaikan akan ditampilkan setelah pekerjaan selesai.',status:state==='Selesai'?'done':state==='Sedang Diperbaiki'?'active':'pending'}
   ];
@@ -405,9 +419,9 @@ function adminHome() {
   return `${heading(`Selamat datang, ${escapeHTML(currentAdminName)}`,'Berikut ringkasan laporan fasilitas kampus hari ini.',`<span class="date-pill">${I('calendar')} Rabu, 28 Oktober 2026</span>`)}
     <div class="stats-grid admin-stats-grid">${statCard('Total laporan','24','reports','','<span class="up">↑ 12%</span> dari bulan lalu')}${statCard('Laporan baru','08','bell','amber','Menunggu verifikasi')}${statCard('Sedang diproses','10','wrench','blue','Termasuk perbaikan aktif')}${statCard('Selesai','06','check','green','<span class="up">↑ 3</span> pekan ini')}${statCard('Prioritas tinggi','03','clock','amber','Perlu perhatian segera')}</div>
     <div class="admin-chart-grid"><section class="panel"><div class="panel-heading"><div><h2>Laporan per Kategori</h2><p>Distribusi laporan fasilitas</p></div><select class="control" style="width:auto;min-width:110px"><option>Bulan ini</option><option>Minggu ini</option></select></div><div class="category-bars">${items.map(([n,v,w])=>`<div><div class="bar-label"><span>${n}</span><strong>${v}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${w}%"></div></div></div>`).join('')}</div></section>
-    <section class="panel"><div class="panel-heading"><div><h2>Laporan berdasarkan Status</h2><p>Ringkasan 24 laporan</p></div></div><div class="donut-wrap"><div class="donut"></div><div class="legend">${[['Menunggu', '#702c3b'],['Diproses','#a87984'],['Diperbaiki','#d2b7bd'],['Selesai','#e8dfe2'],['Ditolak','#f3eff1']].map(([n,c])=>`<div class="legend-item"><span class="legend-dot" style="background:${c}"></span>${n}</div>`).join('')}</div></div></section>
+    <section class="panel"><div class="panel-heading"><div><h2>Laporan berdasarkan Status</h2><p>Ringkasan 24 laporan</p></div></div><div class="donut-wrap"><div class="donut"></div><div class="legend">${[['Menunggu','#475569'],['Diproses','#365314'],['Diperbaiki','#65A30D'],['Selesai','#94A3B8'],['Ditolak','#CBD5E1']].map(([n,c])=>`<div class="legend-item"><span class="legend-dot" style="background:${c}"></span>${n}</div>`).join('')}</div></div></section>
     <section class="panel"><div class="panel-heading"><div><h2>Laporan berdasarkan Lokasi</h2><p>Lokasi dengan laporan terbanyak</p></div></div><div class="chart-area">${[['Gedung A',80],['Gedung B',55],['Gedung C',72],['Gedung D',38],['Area luar',28]].map(([n,v])=>`<div class="chart-column"><div class="chart-bar" style="height:${v}%"></div><span class="chart-label">${n}</span></div>`).join('')}</div></section>
-    <section class="panel"><div class="panel-heading"><div><h2>Perlu Perhatian</h2><p>Laporan prioritas tinggi</p></div><a class="text-link" data-page="manage">Lihat semua →</a></div><div class="priority-list">${reports.filter(r=>r.urgency==='Tinggi').map(r=>`<div class="priority-item"><div class="avatar">${r.reporter.split(' ').map(x=>x[0]).join('')}</div><div><strong>${r.title}</strong><small>${r.id} · ${r.location}</small></div>${urgency(r.urgency)}</div>`).join('')}</div></section></div>`;
+    <section class="panel"><div class="panel-heading"><div><h2>Perlu Perhatian</h2><p>Laporan prioritas tinggi</p></div><a class="text-link" data-page="manage">Lihat semua →</a></div><div class="priority-list">${reports.filter(r=>r.urgency==='Tinggi').map(r=>`<div class="priority-item"><div class="avatar">${escapeHTML(r.reporter.split(' ').map(x=>x[0]).join(''))}</div><div><strong>${escapeHTML(r.title)}</strong><small>${escapeHTML(r.id)} · ${escapeHTML(r.location)}</small></div>${urgency(r.urgency)}</div>`).join('')}</div></section></div>`;
 }
 function managementPage() {
   return `${heading('Manajemen Laporan','Tinjau, verifikasi, dan tindak lanjuti laporan fasilitas.',`<button class="btn btn-outline" data-action="export">${I('reports')} Ekspor</button>`)}
@@ -423,8 +437,8 @@ function handlingPage() {
   return `${heading('Detail Penanganan',r.id,`<button class="btn btn-outline" data-page="manage">${I('back')} Kembali</button>`)}
     <div class="detail-layout"><div><section class="panel"><div class="detail-photo">${selectedImage?`<img src="${selectedImage}" alt="Foto kerusakan">`:`<div class="photo-placeholder">${I('camera',22)}<br>Belum ada foto terlampir</div>`}</div><div class="detail-topline"><div><h2>${escapeHTML(r.title)}</h2><p>${escapeHTML(r.facility)} · ${escapeHTML(r.id)}</p></div>${badge(r.status)}</div><div class="detail-description"><h3>Deskripsi Kerusakan</h3><p>${escapeHTML(r.description)}</p></div><div class="info-grid"><div class="info-item"><small>Pelapor</small><strong>${escapeHTML(r.reporter)}</strong></div><div class="info-item"><small>Lokasi</small><strong>${escapeHTML(r.location)}</strong></div><div class="info-item"><small>Tanggal laporan</small><strong>${escapeHTML(r.date)}</strong></div><div class="info-item"><small>Tingkat urgensi</small>${urgency(r.urgency)}</div></div></section>
     <section class="panel"><div class="panel-heading"><div><h2>Riwayat Status</h2><p>Perubahan status laporan ini</p></div></div>${r.history.slice().reverse().map((entry,index)=>`<div class="history-item"><span class="history-dot" ${index?'style="background:#c9c4ca"':''}></span><div><strong>${escapeHTML(entry.status)}</strong><small>${escapeHTML(entry.date)} · ${entry.status==='Laporan dikirim'?'Laporan diterima sistem':'Status diperbarui oleh pengelola'}</small></div></div>`).join('')}</section>
-    <section class="panel"><div class="panel-heading"><div><h2>Catatan Penanganan</h2><p>Catatan internal dan pembaruan untuk pelapor</p></div></div><textarea class="control" id="handling-note" style="height:84px;padding:10px" placeholder="Tuliskan tindakan yang sudah atau akan dilakukan..."></textarea><button class="btn btn-primary btn-small" style="margin-top:10px" data-action="save-note">${I('check')} Simpan Catatan</button></section></div>
-    <div><section class="panel"><div class="panel-heading"><div><h2>Perbarui Laporan</h2><p>Atur penanganan fasilitas</p></div></div><div class="field"><label>Status laporan</label><select class="control" id="handling-status">${['Menunggu Verifikasi','Diproses','Sedang Diperbaiki','Selesai','Ditolak'].map(s=>`<option ${r.status===s?'selected':''}>${s}</option>`).join('')}</select></div><div class="field" style="margin-top:13px"><label>Prioritas</label><select class="control" id="handling-priority">${['Rendah','Sedang','Tinggi'].map(s=>`<option ${r.urgency===s?'selected':''}>${s}</option>`).join('')}</select></div><div class="field" style="margin-top:13px"><label>Petugas yang menangani</label><select class="control"><option>Belum ditentukan</option><option selected>Admin</option><option>Budi Santoso</option><option>Tim Sarana & Prasarana</option></select></div><div class="field" style="margin-top:13px"><label>Tanggal mulai perbaikan</label><input class="control" type="date" value="2026-10-28"></div><div class="field" style="margin-top:13px"><label>Tanggal selesai</label><input class="control" type="date"></div><button class="btn btn-primary" style="width:100%;margin-top:18px" data-action="update-report">${I('check')} Simpan Perubahan</button></section></div></div>`;
+    <section class="panel"><div class="panel-heading"><div><h2>Catatan Penanganan</h2><p>Catatan internal dan pembaruan untuk pelapor</p></div></div><textarea class="control" id="handling-note" style="height:84px;padding:10px" placeholder="Tuliskan tindakan yang sudah atau akan dilakukan..."></textarea><button class="btn btn-primary btn-small" style="margin-top:10px" data-action="save-note">${I('check')} Simpan Catatan</button>${(r.handlingNotes||[]).length?`<div class="handling-note-list">${r.handlingNotes.slice().reverse().map(entry=>`<div class="handling-note-entry"><p>${escapeHTML(entry.note)}</p><small>${escapeHTML(entry.date)}</small></div>`).join('')}</div>`:''}</section></div>
+    <div><section class="panel"><div class="panel-heading"><div><h2>Perbarui Laporan</h2><p>Atur penanganan fasilitas</p></div></div><div class="field"><label for="handling-status">Status laporan</label><select class="control" id="handling-status">${['Menunggu Verifikasi','Diproses','Sedang Diperbaiki','Selesai','Ditolak'].map(s=>`<option ${r.status===s?'selected':''}>${s}</option>`).join('')}</select></div><div class="field" style="margin-top:13px"><label for="handling-priority">Prioritas</label><select class="control" id="handling-priority">${['Rendah','Sedang','Tinggi'].map(s=>`<option ${r.urgency===s?'selected':''}>${s}</option>`).join('')}</select></div><div class="field" style="margin-top:13px"><label for="handling-assignee">Petugas yang menangani</label><select class="control" id="handling-assignee">${['Belum ditentukan','Admin','Budi Santoso','Tim Sarana & Prasarana'].map(name=>`<option ${r.assignedTo===name?'selected':''}>${name}</option>`).join('')}</select></div><div class="field" style="margin-top:13px"><label for="repair-start-date">Tanggal mulai perbaikan</label><input class="control" id="repair-start-date" type="date" value="${escapeHTML(r.repairStartedAt||'')}"></div><div class="field" style="margin-top:13px"><label for="repair-completion-date">Tanggal selesai</label><input class="control" id="repair-completion-date" type="date" value="${escapeHTML(r.repairCompletedAt||'')}"></div><button class="btn btn-primary" style="width:100%;margin-top:18px" data-action="update-report">${I('check')} Simpan Perubahan</button></section></div></div>`;
 }
 function profilePage() {
   return `${heading('Profil Saya','Kelola informasi akun Anda.') }<div class="form-layout"><section class="form-card"><div class="form-section-title"><span class="step-number">${I('user',13)}</span> Informasi Akun</div><div class="form-grid"><div class="field"><label>Nama lengkap</label><input class="control" id="profile-name" value="${escapeHTML(currentUser.name)}" required></div><div class="field"><label>NPM</label><input class="control" id="profile-npm" value="${escapeHTML(currentUser.npm)}" required></div><div class="field"><label>Email kampus</label><input class="control" id="profile-email" type="email" value="${escapeHTML(currentUser.email)}"></div><div class="field"><label>Program studi</label><input class="control" value="Teknik Informatika"></div><div class="field"><label>Fakultas</label><input class="control" value="Teknik"></div><div class="field"><label>Angkatan</label><input class="control" value="2025"></div></div><div class="form-actions"><button class="btn btn-primary" data-action="save-profile">${I('check')} Simpan Perubahan</button></div></section><aside class="info-aside"><div class="info-box"><div class="avatar" id="profile-avatar" style="width:54px;height:54px;font-size:17px;margin-bottom:12px">${userInitials(currentUser.name)}</div><h3 id="profile-preview-name">${escapeHTML(currentUser.name)}</h3><p>Mahasiswa · Teknik Sipil<br>Universitas Nusantara</p></div></aside></div>`;
@@ -468,7 +482,13 @@ function render(animate = false) {
 }
 function showToast(message) {
   const region = document.getElementById('toast-region');
-  region.innerHTML = `<div class="toast">${I('check')}<span>${message}</span></div>`;
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.innerHTML = I('check');
+  const text = document.createElement('span');
+  text.textContent = message;
+  toast.append(text);
+  region.replaceChildren(toast);
   clearTimeout(toastTimer);
   toastTimer = setTimeout(()=>region.innerHTML='', 3400);
 }
@@ -503,6 +523,39 @@ function applyAdminFilters() {
   const rows=reports.filter(r=>(!status||r.status===status)&&(!priority||r.urgency===priority)&&(!query||`${r.id} ${r.reporter} ${r.title} ${r.facility} ${r.location}`.toLowerCase().includes(query)));
   document.getElementById('admin-table').innerHTML=rows.length?rows.map(adminRow).join(''):`<tr><td colspan="8"><div class="empty-state"><div class="empty-illustration">${I('search')}</div><h3>Laporan tidak ditemukan</h3><p>Coba ubah kata kunci atau filter yang dipilih.</p></div></td></tr>`;
 }
+function exportReports() {
+  if (!reports.length) {
+    showToast('Tidak ada laporan untuk diekspor.');
+    return;
+  }
+  const columns = ['ID Laporan','Judul','Kategori','Lokasi','Pelapor','Tanggal','Status','Prioritas','Deskripsi'];
+  const csvCell = value => {
+    const text = String(value ?? '');
+    const safeText = /^[\t\r\n ]*[=+\-@]/.test(text) ? `'${text}` : text;
+    return `"${safeText.replace(/"/g,'""')}"`;
+  };
+  const csv = '\uFEFF' + [
+    columns,
+    ...reports.map(report => [
+      report.id,report.title,report.category,report.location,report.reporter,
+      report.date,report.status,report.urgency,report.description
+    ])
+  ].map(row => row.map(csvCell).join(',')).join('\r\n');
+  try {
+    const url = URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `laporan-fasilitas-${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url),0);
+    showToast('File laporan berhasil diunduh.');
+  } catch (error) {
+    console.error('Data laporan gagal diekspor.',error);
+    showToast('Laporan gagal diekspor. Coba lagi.');
+  }
+}
 document.addEventListener('click', e => {
   const publicCard=e.target.closest('[data-public-report]');
   if(publicCard){
@@ -511,7 +564,7 @@ document.addEventListener('click', e => {
     return;
   }
   const pageButton=e.target.closest('[data-page]');
-  if(pageButton){e.preventDefault();document.getElementById('sidebar')?.classList.remove('open');document.getElementById('sidebar-overlay')?.classList.remove('active');setPage(pageButton.dataset.page);return;}
+  if(pageButton){e.preventDefault();if(pageButton.dataset.page===currentPage)return;document.getElementById('sidebar')?.classList.remove('open');document.getElementById('sidebar-overlay')?.classList.remove('active');setPage(pageButton.dataset.page);return;}
   const reportButton=e.target.closest('[data-report]');
   if(reportButton){openReport(reportButton.dataset.report,role==='admin');return;}
   const action=e.target.closest('[data-action]')?.dataset.action;
@@ -533,14 +586,43 @@ document.addEventListener('click', e => {
   if(action==='toggle-password'){const field=document.getElementById('login-password');field.type=field.type==='password'?'text':'password';e.currentTarget.innerHTML=I(field.type==='password'?'eye':'eyeOff');}
   if(action==='forgot'){e.preventDefault();showToast('Silakan hubungi helpdesk kampus untuk reset password.');}
   if(action==='read-all'){document.querySelectorAll('.notification-item.unread').forEach(x=>x.classList.remove('unread'));document.querySelectorAll('.unread-dot').forEach(x=>x.remove());showToast('Semua notifikasi ditandai sudah dibaca.');}
-  if(action==='export'){showToast('Data laporan siap diekspor.');}
+  if(action==='export')exportReports();
   if(action==='edit-report'){openReport(e.target.closest('[data-id]').dataset.id,true);}
-  if(action==='save-note'){const note=document.getElementById('handling-note').value.trim();if(!note){showToast('Tambahkan catatan sebelum menyimpan.');return;}showToast('Catatan penanganan berhasil disimpan.');}
+  if(action==='save-note'){
+    const note=document.getElementById('handling-note').value.trim();
+    if(!note){showToast('Tambahkan catatan sebelum menyimpan.');return;}
+    const handlingNotes=[...(selectedReport.handlingNotes||[]),{
+      note,
+      date:new Date().toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})
+    }];
+    try {
+      persistReportUpdate(selectedReport,{handlingNotes});
+      render(true);
+      showToast('Catatan penanganan berhasil disimpan.');
+    } catch(error) {
+      showToast(error.message);
+    }
+  }
   if(action==='update-report'){
     try {
-      const statusChanged=updateReportStatus(selectedReport,document.getElementById('handling-status').value,document.getElementById('handling-priority').value);
+      const repairStartedAt=document.getElementById('repair-start-date').value;
+      const repairCompletedAt=document.getElementById('repair-completion-date').value;
+      if(repairStartedAt&&repairCompletedAt&&repairCompletedAt<repairStartedAt){
+        showToast('Tanggal selesai tidak boleh lebih awal dari tanggal mulai.');
+        return;
+      }
+      const changed=updateReportStatus(
+        selectedReport,
+        document.getElementById('handling-status').value,
+        document.getElementById('handling-priority').value,
+        {
+          assignedTo:document.getElementById('handling-assignee').value,
+          repairStartedAt,
+          repairCompletedAt,
+        }
+      );
       render(true);
-      showToast(statusChanged?'Status laporan berhasil diperbarui.':'Perubahan laporan berhasil disimpan.');
+      showToast(changed?'Perubahan laporan berhasil disimpan.':'Tidak ada perubahan untuk disimpan.');
     } catch(error) {
       showToast(error.message);
     }
@@ -916,7 +998,6 @@ document.addEventListener('submit',e=>{
     });
   }
 });
-document.addEventListener('click',e=>{if(e.target.closest('[data-page="create"]')&&currentPage==='create')return;});
 window.addEventListener('popstate',()=>{
   if(history.state?.role==='student'||history.state?.role==='admin')role=history.state.role;
   const route=location.hash.match(/^#\/track\/(.+)$/);
@@ -930,10 +1011,13 @@ window.addEventListener('popstate',()=>{
     }
     if(report){selectedReport=report;selectedImage=report.image||'';currentPage='track';}
     else currentPage='landing';
-  }else if(location.hash==='#/report')currentPage='report';
+  }else if(location.hash==='#/landing')currentPage='landing';
+  else if(location.hash==='#/report')currentPage='report';
+  else if(['landing','report','track'].includes(history.state?.page))currentPage=history.state.page;
   else if(['home','create','mine','detail','notifications','adminHome','manage','handling','profile','login'].includes(history.state?.page)){
     currentPage=history.state.page;
   }else currentPage='login';
+  if(currentPage==='create'||currentPage==='report')selectedImage='';
   render(true);
 });
 const initialTrack=location.hash.match(/^#\/track\/(.+)$/);
@@ -946,7 +1030,9 @@ if(initialTrack){
     console.warn('ID tiket pada URL tidak valid.',error);
   }
   if(report){selectedReport=report;selectedImage=report.image||'';currentPage='track';}
-}else if(location.hash==='#/report')currentPage='report';
+}else if(location.hash==='#/landing')currentPage='landing';
+else if(location.hash==='#/report')currentPage='report';
+else if(['landing','report','track'].includes(history.state?.page))currentPage=history.state.page;
 if(!history.state?.page)history.replaceState({page:currentPage,role},'',location.href);
 render();
 if(storageWarning)showToast('Sebagian data browser tidak dapat dibaca atau disimpan. Aplikasi tetap dapat digunakan, tetapi perubahan mungkin tidak tersimpan.');
