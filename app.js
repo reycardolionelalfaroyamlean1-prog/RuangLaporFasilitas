@@ -36,6 +36,8 @@ const defaultReports = [
 const reportsStorageKey = 'ruanglapor.reports';
 const userStorageKey = 'ruanglapor.user';
 const reportStatuses = ['Menunggu Verifikasi','Diproses','Sedang Diperbaiki','Selesai','Ditolak'];
+let reportCategories = null;
+let reportCategoriesPromise = null;
 let storageWarning = false;
 function readStoredValue(key, description) {
   try {
@@ -180,6 +182,72 @@ function updateReportStatus(report, status, urgencyValue = report.urgency, handl
   }
   persistReportUpdate(report, updates);
   return true;
+}
+function setReportCategoryOptions(state, categories = []) {
+  const selects = document.querySelectorAll('#public-category, #report-category');
+  for (const select of selects) {
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = state === 'loading'
+      ? 'Memuat kategori...'
+      : state === 'error'
+        ? 'Kategori gagal dimuat. Muat ulang halaman.'
+        : state === 'empty'
+          ? 'Belum ada kategori tersedia.'
+          : select.id === 'public-category'
+            ? 'Pilih kategori fasilitas'
+            : 'Pilih kategori';
+    placeholder.disabled = state === 'loading' || state === 'empty';
+    select.replaceChildren(placeholder);
+    select.disabled = state === 'loading' || state === 'empty';
+
+    if (state === 'loaded') {
+      for (const category of categories) {
+        const option = document.createElement('option');
+        option.value = category;
+        option.textContent = category;
+        select.append(option);
+      }
+    }
+  }
+}
+async function loadReportCategories() {
+  const selects = document.querySelectorAll('#public-category, #report-category');
+  if (!selects.length) return;
+
+  if (reportCategories !== null) {
+    setReportCategoryOptions(reportCategories.length ? 'loaded' : 'empty', reportCategories);
+    return;
+  }
+
+  setReportCategoryOptions('loading');
+  try {
+    if (!reportCategoriesPromise) {
+      reportCategoriesPromise = (async () => {
+        if (!window.supabaseClient) {
+          throw new Error('Supabase client belum tersedia.');
+        }
+
+        const { data, error } = await window.supabaseClient
+          .from('categories')
+          .select('category_name')
+          .order('category_name', { ascending: true });
+
+        if (error) throw error;
+
+        return (Array.isArray(data) ? data : [])
+          .map(row => typeof row.category_name === 'string' ? row.category_name.trim() : '')
+          .filter(Boolean);
+      })();
+    }
+
+    reportCategories = await reportCategoriesPromise;
+    setReportCategoryOptions(reportCategories.length ? 'loaded' : 'empty', reportCategories);
+  } catch (error) {
+    reportCategoriesPromise = null;
+    console.error('Kategori laporan gagal dimuat.', { code: error?.code || 'unknown' });
+    setReportCategoryOptions('error');
+  }
 }
 function setPage(page) {
   currentPage = page;
@@ -326,7 +394,7 @@ function publicReportForm() {
     <form class="public-form-card" id="public-report-form">
       <section class="public-form-section"><h2><span class="form-step">01</span> Kategori &amp; Lokasi</h2>
         <div class="public-field-grid">
-          <div class="field"><label for="public-category">Kategori <span class="required">*</span></label><select class="control" id="public-category" required><option value="">Pilih kategori fasilitas</option><option>Kelistrikan</option><option>Air &amp; Plumbing</option><option>Mebel/Furniture</option><option>Kebersihan</option><option>Lainnya</option></select></div>
+          <div class="field"><label for="public-category">Kategori <span class="required">*</span></label><select class="control" id="public-category" required><option value="">Memuat kategori...</option></select></div>
           <div class="field"><label for="public-building">Gedung / area <span class="required">*</span></label><select class="control" id="public-building" required><option value="">Pilih gedung atau area</option><option>Gedung A</option><option>Gedung B</option><option>Gedung C</option><option>Gedung D</option><option>Area luar</option></select></div>
           <div class="field public-field-full"><label for="public-location">Detail lokasi <span class="required">*</span></label><input class="control" id="public-location" required placeholder="Contoh: Ruang Kelas 302, dekat jendela kanan"></div>
           <div class="field public-field-full"><label for="public-title">Ringkasan kerusakan <span class="required">*</span></label><input class="control" id="public-title" required maxlength="90" placeholder="Contoh: AC Gedung A mati total"></div>
@@ -378,7 +446,7 @@ function createReport() {
         <div class="field"><label>Nama pelapor <span class="required">*</span></label><input class="control" id="reporter-name" required value="${escapeHTML(currentUser.name)}" placeholder="Nama lengkap"></div>
         <div class="field"><label>Lokasi fasilitas <span class="required">*</span></label><select class="control" id="report-campus-location" required><option value="">Pilih lokasi kampus</option><option>Area Kampus Utama</option><option>Area Kampus Barat</option><option>Area Kampus Timur</option></select></div>
         <div class="field"><label>Gedung / ruangan <span class="required">*</span></label><input class="control" id="report-location-detail" required placeholder="Contoh: Gedung A, Ruang 204"></div>
-        <div class="field"><label>Kategori fasilitas <span class="required">*</span></label><select class="control" id="report-category" required><option value="">Pilih kategori</option><option>Kelistrikan</option><option>Furnitur</option><option>Plumbing</option><option>Elektronik</option><option>Bangunan</option><option>Area luar</option></select></div>
+        <div class="field"><label>Kategori fasilitas <span class="required">*</span></label><select class="control" id="report-category" required><option value="">Memuat kategori...</option></select></div>
         <div class="field full"><label>Nama fasilitas / jenis kerusakan <span class="required">*</span></label><input class="control" id="report-title" required placeholder="Contoh: Lampu koridor mati"></div>
         <div class="field full"><label>Deskripsi kerusakan <span class="required">*</span></label><textarea class="control" id="report-description" required placeholder="Ceritakan kondisi kerusakan, sejak kapan terjadi, dan informasi lain yang membantu..."></textarea><span class="helper">Jelaskan lokasi spesifik dan kondisi kerusakan dengan singkat.</span></div>
         <div class="field full"><label>Foto kerusakan</label><label class="upload-box" for="photo-input"><div>${I('upload')}<strong id="upload-label">Klik untuk unggah atau tarik foto ke sini</strong><small>JPG atau PNG · Maksimal 5 MB</small></div><input id="photo-input" type="file" accept="image/*" hidden></label><span class="helper">Foto membantu pihak pengelola memverifikasi kondisi fasilitas dengan lebih cepat.</span></div>
@@ -475,6 +543,7 @@ function render(animate = false) {
     : publicPages[currentPage]
       ? publicPages[currentPage]()
       : shell(pages[currentPage]());
+  loadReportCategories();
   if(animate){
     const page=document.querySelector('.content, .public-main, .public-form-page, .public-track-page, .login-form-wrap');
     page?.classList.add('page-enter');
