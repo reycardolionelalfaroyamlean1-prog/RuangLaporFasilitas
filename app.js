@@ -451,7 +451,7 @@ function loginPage(adminMode = false) {
     <section class="login-visual">
       <div class="brand"><div class="brand-mark">${I('campus',20)}</div><div><div class="brand-name">RuangLapor</div><div class="brand-caption">Pelaporan Kerusakan Fasilitas Kampus</div></div></div>
       <div class="visual-copy"><div class="overline">Universitas Musamus</div><h1>Fasilitas baik,<br>kampus nyaman.</h1><p>Laporkan kerusakan fasilitas dengan mudah. Kami membantu menjaga ruang belajar yang aman dan nyaman untuk seluruh civitas akademika.</p><div class="visual-features"><div class="visual-feature"><span class="feature-check">✓</span> Pelaporan mudah dan transparan</div><div class="visual-feature"><span class="feature-check">✓</span> Pantau progres secara real-time</div><div class="visual-feature"><span class="feature-check">✓</span> Tindak lanjut oleh tim profesional</div></div></div>
-      <div class="login-footer">© 2026 Universitas Musamus · Layanan Sarana & Prasarana, DIBUAT OLEH REY ASELI RILL NO FEK NO TIPU  </div>
+      <div class="login-footer">© 2026 Universitas Musamus · Layanan Sarana & Prasarana </div>
     </section>
     <section class="login-side"><div class="login-form-wrap">
       <div class="brand"><div class="brand-mark">${I('campus',20)}</div><div><div class="brand-name">RuangLapor</div><div class="brand-caption">Pelaporan Kerusakan Fasilitas Kampus</div></div></div>
