@@ -42,14 +42,24 @@ let reportFacilities = null;
 let reportFacilitiesPromise = null;
 let storageWarning = false;
 let loginMode = 'student';
+let passwordResetRequestRequired = false;
 let authSyncRevision = 0;
 let authSyncInFlight = null;
 let authInitializationPending = true;
+let adminReports = [];
+let adminReportsLoading = false;
+let adminReportsError = '';
+let adminReportsLoadedFor = '';
+let adminReportsLoadPromise = null;
+let authorizedTrackingTicket = '';
 const authCallbackParams = new URLSearchParams(
   `${window.location.search}&${window.location.hash.slice(1)}`
 );
+const authEmailRedirectUrl = 'https://reycardolionelalfaroyamlean1-prog.github.io/RuangLaporFasilitas/';
+let passwordRecoveryRequired = authCallbackParams.get('type') === 'recovery';
 let passwordSetupRequired = window.supabaseInviteCallback === true ||
-  authCallbackParams.get('type') === 'invite';
+  authCallbackParams.get('type') === 'invite' ||
+  passwordRecoveryRequired;
 function readStoredValue(key, description) {
   try {
     return window.localStorage.getItem(key);
@@ -139,40 +149,6 @@ function saveReports() {
   if (!writeStoredValue(reportsStorageKey, JSON.stringify(reports), 'Data laporan')) {
     throw new Error('Perubahan laporan tidak dapat disimpan di browser ini.');
   }
-}
-function persistReportUpdate(report, updates) {
-  const previous = { ...report };
-  Object.assign(report, updates);
-  try {
-    saveReports();
-  } catch (error) {
-    for (const key of Object.keys(report)) {
-      if (!Object.prototype.hasOwnProperty.call(previous, key)) delete report[key];
-    }
-    Object.assign(report, previous);
-    throw error;
-  }
-}
-function updateReportStatus(report, status, urgencyValue = report.urgency, handlingUpdates = {}) {
-  if (!reportStatuses.includes(status)) {
-    throw new Error(`Status laporan tidak dikenal: ${status}`);
-  }
-  if (!['Rendah','Sedang','Tinggi'].includes(urgencyValue)) {
-    throw new Error(`Prioritas laporan tidak dikenal: ${urgencyValue}`);
-  }
-  const statusChanged = report.status !== status;
-  const urgencyChanged = report.urgency !== urgencyValue;
-  const handlingChanged = Object.keys(handlingUpdates).some(key => report[key] !== handlingUpdates[key]);
-  if (!statusChanged && !urgencyChanged && !handlingChanged) return false;
-  const updates = { ...handlingUpdates, status, urgency:urgencyValue };
-  if (statusChanged) {
-    updates.history = [...(report.history || []), {
-      status,
-      date: new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' }),
-    }];
-  }
-  persistReportUpdate(report, updates);
-  return true;
 }
 function databaseIdString(value) {
   const id = typeof value === 'string'
@@ -369,14 +345,21 @@ async function submitReportToSupabase(payload) {
   if (
     typeof data?.ticket_number !== 'string' ||
     !/^RLF-\d{10}$/.test(data.ticket_number) ||
+    typeof data?.tracking_token !== 'string' ||
+    !/^[a-f0-9]{64}$/i.test(data.tracking_token) ||
     data.status !== 'Menunggu Verifikasi' ||
     !createdAt ||
     !Number.isFinite(createdAt.getTime())
   ) {
-    throw new Error('Respons server belum berisi nomor tiket yang valid. Laporan mungkin sudah diterima; hubungi pengelola sebelum mencoba ulang.');
+    throw new Error('Respons server belum berisi nomor tiket dan kunci pelacakan yang valid. Laporan mungkin sudah diterima; hubungi pengelola sebelum mencoba ulang.');
   }
 
-  return { ticketNumber: data.ticket_number, status: data.status, createdAt };
+  return {
+    ticketNumber: data.ticket_number,
+    trackingToken: data.tracking_token,
+    status: data.status,
+    createdAt,
+  };
 }
 function submitReportForm(form, payload, createLocalReport, openReportPage) {
   if (form.dataset.submissionPending === 'true') return;
@@ -422,14 +405,161 @@ function submitReportForm(form, payload, createLocalReport, openReportPage) {
     selectedReport = localReport;
     selectedImage = localReport.image || '';
     openReportPage();
-    showToast([
-      `Laporan tersimpan. Tiket #${savedReport.ticketNumber}.`,
-      selectedImage ? 'Foto belum tersimpan di Supabase.' : '',
-      cacheSaved ? '' : 'Salinan lokal tidak tersimpan.',
-    ].filter(Boolean).join(' '));
+    const trackingMessage = [
+      `Laporan tersimpan di Supabase dengan tiket <strong>${escapeHTML(savedReport.ticketNumber)}</strong>.`,
+      '<br>Simpan kunci rahasia ini. Kunci tidak dapat ditampilkan kembali:',
+      `<br><code>${escapeHTML(savedReport.trackingToken)}</code>`,
+      '<br>Untuk melacak, masukkan nomor tiket dan kunci tersebut.',
+      selectedImage ? '<br>Foto belum tersimpan di Supabase.' : '',
+      cacheSaved ? '' : '<br>Salinan lokal tidak tersimpan.',
+    ].filter(Boolean).join('');
+    form.dataset.submissionPending = 'false';
+    showModal('Simpan kunci pelacakan', trackingMessage, 'Saya sudah menyimpannya', () => {});
   }, () => {
     form.dataset.submissionPending = 'false';
   });
+}
+async function trackReportFromSupabase(ticketNumber, trackingToken) {
+  if (!window.supabaseClient) {
+    throw new Error('Koneksi Supabase belum tersedia. Muat ulang halaman dan coba lagi.');
+  }
+  const { data, error } = await window.supabaseClient.functions.invoke('track-report', {
+    body: { ticket_number: ticketNumber, tracking_token: trackingToken },
+  });
+  if (error || !data?.report) {
+    console.error('Pelacakan laporan gagal.', {
+      code: error?.code,
+      status: error?.status,
+      responseError: data?.error,
+    });
+    throw new Error('Laporan tidak ditemukan atau kunci pelacakan tidak sesuai.');
+  }
+  const row = data.report;
+  const createdAt = new Date(row.created_at);
+  if (
+    row.ticket_number !== ticketNumber ||
+    !reportStatuses.includes(row.status) ||
+    typeof row.title !== 'string' ||
+    typeof row.description !== 'string' ||
+    typeof row.location_detail !== 'string' ||
+    !Number.isFinite(createdAt.getTime())
+  ) {
+    throw new Error('Data pelacakan belum dapat dibaca. Coba lagi nanti.');
+  }
+  selectedReport = {
+    id: row.ticket_number,
+    title: row.title,
+    category: row.category || '',
+    facility: row.facility || row.category || 'Fasilitas',
+    location: row.location_detail,
+    date: createdAt.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }),
+    status: row.status,
+    reporter: 'Anonim',
+    description: row.description,
+    image: '',
+    history: [{
+      status: row.status,
+      date: createdAt.toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' }),
+    }],
+  };
+  selectedImage = '';
+  authorizedTrackingTicket = ticketNumber;
+  setPage('track');
+}
+function mapAdminReport(row) {
+  const createdAt = new Date(row.created_at);
+  const date = Number.isFinite(createdAt.getTime())
+    ? createdAt.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' })
+    : '';
+  return {
+    id: row.ticket_number,
+    title: row.title,
+    facility: row.facility || row.category || 'Fasilitas',
+    category: row.category || '',
+    location: row.location_detail || '',
+    date,
+    status: row.status,
+    urgency: '',
+    reporter: 'Anonim',
+    description: row.description || '',
+    image: row.photo_url || '',
+    statusId: row.status_id,
+    history: [{
+      status: row.status,
+      date: Number.isFinite(createdAt.getTime())
+        ? createdAt.toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })
+        : date,
+    }],
+  };
+}
+async function loadAdminReports(force = false) {
+  const userId = currentUser.id;
+  if (!userId || role !== 'admin') return false;
+  if (!force && adminReportsLoadedFor === userId) return true;
+  if (adminReportsLoadPromise) return adminReportsLoadPromise;
+
+  adminReportsLoading = true;
+  adminReportsError = '';
+  render(true);
+  const promise = (async () => {
+    const { data, error } = await window.supabaseClient.functions.invoke('admin-reports', {
+      body: { action: 'list' },
+    });
+    if (error || !Array.isArray(data?.reports)) {
+      console.error('Laporan Admin gagal dimuat.', {
+        code: error?.code,
+        status: error?.status,
+        responseError: data?.error,
+      });
+      throw new Error('Laporan Supabase belum dapat dimuat.');
+    }
+    if (role !== 'admin' || currentUser.id !== userId) return false;
+    adminReports = data.reports.map(mapAdminReport);
+    adminReportsLoadedFor = userId;
+    return true;
+  })();
+  adminReportsLoadPromise = promise;
+  try {
+    return await promise;
+  } catch (error) {
+    if (role === 'admin' && currentUser.id === userId) {
+      adminReportsError = error.message;
+    }
+    return false;
+  } finally {
+    if (adminReportsLoadPromise === promise) {
+      adminReportsLoadPromise = null;
+      adminReportsLoading = false;
+      render(true);
+    }
+  }
+}
+async function persistAdminReportStatus(report, status) {
+  if (!currentUser.id || role !== 'admin') {
+    throw new Error('Sesi Admin tidak valid. Silakan masuk kembali.');
+  }
+  const { data, error } = await window.supabaseClient.functions.invoke('admin-reports', {
+    body: { action: 'update_status', ticket_number: report.id, status },
+  });
+  if (error || data?.report?.status !== status) {
+    console.error('Status laporan gagal disimpan.', {
+      code: error?.code,
+      status: error?.status,
+      responseError: data?.error,
+    });
+    throw new Error('Status laporan belum dapat disimpan ke Supabase.');
+  }
+  report.status = data.report.status;
+  report.statusId = data.report.status_id;
+}
+function adminReportsNotice() {
+  if (adminReportsLoading) {
+    return '<section class="panel"><p>Memuat laporan dari Supabase...</p></section>';
+  }
+  if (adminReportsError) {
+    return `<section class="panel"><p>${escapeHTML(adminReportsError)}</p><button class="btn btn-outline btn-small" data-action="reload-admin-reports">Muat ulang</button></section>`;
+  }
+  return '';
 }
 function authorizedPage(page) {
   const publicPages = ['landing', 'report', 'track'];
@@ -556,7 +686,7 @@ function reportRows(items) {
   return items.map(r => `<div class="report-row" data-report="${escapeHTML(r.id)}"><div><div class="report-title">${escapeHTML(r.title)}</div><div class="report-meta"><span>${escapeHTML(r.id)}</span><span class="meta-dot"></span><span>${escapeHTML(r.location)}</span><span class="meta-dot"></span><span>${escapeHTML(r.date)}</span></div></div><div class="report-right">${badge(r.status)}${I('arrow',15)}</div></div>`).join('');
 }
 function publicHeader() {
-  return `<header class="public-header"><a class="public-brand" href="#" data-page="landing"><span class="public-brand-mark">${I('campus')}</span><span><strong>Ruang Lapor</strong><small>Fasilitas</small></span></a><form class="ticket-search" id="ticket-lookup"><label class="sr-only" for="ticket-id">Cari ID tiket</label>${I('search')}<input id="ticket-id" class="control" placeholder="Cari ID tiket, contoh RLF-8921" required><button type="submit" class="btn btn-primary btn-small">Lacak tiket</button></form><button class="btn btn-outline public-admin-link" data-action="admin-login">${I('shield')} Login Admin</button><button class="icon-button mobile-menu public-search-toggle" aria-label="Cari tiket" data-action="toggle-ticket-search">${I('search')}</button></header>`;
+  return `<header class="public-header"><a class="public-brand" href="#" data-page="landing"><span class="public-brand-mark">${I('campus')}</span><span><strong>Ruang Lapor</strong><small>Fasilitas</small></span></a><form class="ticket-search" id="ticket-lookup"><label class="sr-only" for="ticket-id">Nomor tiket</label>${I('search')}<input id="ticket-id" class="control" placeholder="Nomor tiket" required autocomplete="off"><label class="sr-only" for="tracking-token">Kunci pelacakan</label><input id="tracking-token" class="control" type="password" placeholder="Kunci pelacakan" required autocomplete="off"><button type="submit" class="btn btn-primary btn-small">Lacak</button></form><button class="btn btn-outline public-admin-link" data-action="admin-login">${I('shield')} Login Admin</button><button class="icon-button mobile-menu public-search-toggle" aria-label="Cari tiket" data-action="toggle-ticket-search">${I('search')}</button></header>`;
 }
 function publicStatus(status) {
   return `<span class="public-status ${statusClass(status)}">${escapeHTML(status)}</span>`;
@@ -565,7 +695,7 @@ function publicReportCard(report, index) {
   const category = report.category || report.facility || 'Fasilitas';
   const location = report.location || 'Kampus';
   const time = report.timeAgo || ['2 jam yang lalu','5 jam yang lalu','Kemarin','2 hari yang lalu'][index % 4];
-  return `<article class="public-report-card" data-public-report="${escapeHTML(report.id)}" tabindex="0" role="button" aria-label="Lacak tiket ${escapeHTML(report.id)}">
+  return `<article class="public-report-card">
     <div class="public-thumb">
       ${report.image?`<img src="${escapeHTML(report.image)}" alt="Foto ${escapeHTML(report.title)}">`:`<div class="thumb-placeholder ${category==='Kelistrikan'?'thumb-electric':category==='Furnitur'||category==='Mebel/Furniture'?'thumb-furniture':category==='Plumbing'||category==='Air & Plumbing'?'thumb-water':'thumb-general'}">${I(category==='Kelistrikan'?'wrench':category==='Furnitur'||category==='Mebel/Furniture'?'building':category==='Plumbing'||category==='Air & Plumbing'?'pin':'reports',32)}</div>`}
       <span class="category-tag">${escapeHTML(category)}</span>
@@ -575,7 +705,7 @@ function publicReportCard(report, index) {
   </article>`;
 }
 function landingPage() {
-  const latest = [...reports].slice(0,6);
+  const latest = [];
   return `<div class="public-site">${publicHeader()}<main class="public-main">
     <section class="public-hero">
       <div class="hero-copy"><span class="hero-kicker">${I('shield',15)} PELAPORAN FASILITAS KAMPUS</span><h1>Laporkan Kerusakan Fasilitas dengan Cepat &amp; Transparan</h1><p>Bantu kami menjaga kenyamanan lingkungan bersama. Tanggapan cepat, status terbuka.</p>
@@ -584,9 +714,9 @@ function landingPage() {
       </div>
       <div class="hero-aside"><div class="hero-status-card"><span class="status-card-icon">${I('reports',20)}</span><div><strong>Pelaporan terbuka</strong><small>Setiap laporan dapat dipantau sampai selesai.</small></div><span class="online-indicator"></span></div><div class="hero-aside-note"><span class="hero-note-line"></span><p>Satu laporan kecil dapat membuat ruang belajar lebih nyaman untuk semua.</p></div></div>
     </section>
-    <section class="public-metrics" aria-label="Ringkasan laporan"><div class="metric-item"><strong>124</strong><span>Total Laporan Masuk</span></div><div class="metric-item"><strong>98</strong><span>Laporan Selesai</span></div><div class="metric-item"><strong>24 <small>Jam</small></strong><span>Rata-rata Penanganan</span></div></section>
-    <section class="public-feed" id="laporan-terkini"><div class="feed-heading"><div><span class="section-kicker">TRANSPARANSI KAMPUS</span><h2>Laporan Terkini</h2><p>Lihat laporan fasilitas yang sedang ditangani di lingkungan kampus.</p></div><button class="btn btn-outline" data-page="report">${I('plus')} Buat laporan</button></div>
-      <div class="public-report-grid">${latest.length?latest.map(publicReportCard).join(''):`<div class="public-empty"><div class="empty-illustration">${I('reports')}</div><h3>Belum ada laporan terkini</h3><p>Jadilah yang pertama melaporkan fasilitas yang perlu diperbaiki.</p></div>`}</div>
+    <section class="public-metrics" aria-label="Ringkasan laporan"><div class="metric-item"><strong>—</strong><span>Total Laporan Masuk</span></div><div class="metric-item"><strong>—</strong><span>Laporan Selesai</span></div><div class="metric-item"><strong>—</strong><span>Rata-rata Penanganan</span></div></section>
+    <section class="public-feed" id="laporan-terkini"><div class="feed-heading"><div><span class="section-kicker">TRANSPARANSI KAMPUS</span><h2>Laporan Terkini</h2><p>Laporan hanya dapat dilihat setelah nomor tiket dan kunci pelacakan diverifikasi.</p></div><button class="btn btn-outline" data-page="report">${I('plus')} Buat laporan</button></div>
+      <div class="public-report-grid">${latest.length?latest.map(publicReportCard).join(''):`<div class="public-empty"><div class="empty-illustration">${I('reports')}</div><h3>Ringkasan publik tidak tersedia</h3><p>Masukkan nomor tiket dan kunci pelacakan untuk melihat laporan Anda.</p></div>`}</div>
       <div class="feed-footnote">${I('shield',15)} Informasi pelapor tidak ditampilkan di halaman publik.</div>
     </section>
   </main><footer class="public-footer"><span>© 2026 Ruang Lapor Fasilitas · Universitas Musamus</span><span>Untuk lingkungan kampus yang lebih nyaman.</span></footer></div>`;
@@ -613,10 +743,13 @@ function publicReportForm() {
       <section class="public-form-section public-privacy-section"><label class="anonymous-check"><input type="checkbox" id="anonymous-report"><span class="checkmark"></span><span><strong>Kirim sebagai Laporan Anonim</strong><small>Nama Anda tidak akan ditampilkan pada laporan.</small></span></label><div class="field" id="public-reporter-field"><label for="public-reporter">Nama pelapor <span class="required">*</span></label><input class="control" id="public-reporter" required value="${escapeHTML(currentUser.name)}" placeholder="Nama lengkap"></div></section>
       <footer class="public-form-actions"><button type="button" class="btn btn-ghost" data-page="landing">Batal</button><button type="submit" class="btn btn-primary">${I('arrow')} Kirim Laporan</button></footer>
     </form>
-  </main><footer class="public-footer"><span>© 2026 Ruang Lapor Fasilitas · Universitas Musamus</span><span>Data laporan pada prototipe disimpan di browser ini.</span></footer></div>`;
+  </main><footer class="public-footer"><span>© 2026 Ruang Lapor Fasilitas · Universitas Musamus</span><span>Kunci pelacakan hanya ditampilkan setelah laporan berhasil dikirim.</span></footer></div>`;
 }
 function trackingPage() {
   const report=selectedReport;
+  if (!report || report.id !== authorizedTrackingTicket) {
+    return `<div class="public-site">${publicHeader()}<main class="public-track-page"><section class="panel empty-state"><h2>Pelacakan memerlukan verifikasi</h2><p>Masukkan nomor tiket dan kunci pelacakan yang diberikan saat laporan dikirim.</p></section></main></div>`;
+  }
   const state=['Menunggu Verifikasi','Diproses','Sedang Diperbaiki','Selesai'].includes(report.status)?report.status:'Ditolak';
   const activeIndex=state==='Menunggu Verifikasi'?1:state==='Diproses'?2:state==='Sedang Diperbaiki'?3:state==='Selesai'?4:1;
   const verified=['Diproses','Sedang Diperbaiki','Selesai'].includes(report.status);
@@ -688,31 +821,70 @@ function notificationsPage() {
   ];
   return `${heading('Notifikasi','Tetap terhubung dengan perkembangan penanganan laporan Anda.',`<button class="btn btn-outline btn-small" data-action="read-all">Tandai semua dibaca</button>`)}<section class="panel"><div class="notification-list">${notes.map(([icon,title,text,date,unread])=>`<div class="notification-item ${unread?'unread':''}"><div class="notice-icon">${I(icon)}</div><div><strong>${title}</strong><p>${text}</p><small>${date}</small></div>${unread?'<span class="unread-dot"></span>':''}</div>`).join('')}</div></section>`;
 }
+function getAdminReportCounts() {
+  const count = status => adminReports.filter(report => report.status === status).length;
+  return {
+    total: adminReports.length,
+    waiting: count('Menunggu Verifikasi'),
+    processing: count('Diproses') + count('Sedang Diperbaiki'),
+    completed: count('Selesai'),
+    rejected: count('Ditolak'),
+  };
+}
 function adminHome() {
-  const items = [['Kelistrikan',8,78],['Furnitur',6,58],['Plumbing',5,46],['Elektronik',3,30],['Bangunan',2,20]];
-  return `${heading(`Selamat datang, ${escapeHTML(currentAdminName)}`,'Berikut ringkasan laporan fasilitas kampus hari ini.',`<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="date-pill">${I('calendar')} Rabu, 28 Oktober 2026</span><button class="btn btn-primary" data-action="add-student">${I('plus')} Tambah Mahasiswa</button></div>`)}
-    <div class="stats-grid admin-stats-grid">${statCard('Total laporan','24','reports','','<span class="up">↑ 12%</span> dari bulan lalu')}${statCard('Laporan baru','08','bell','amber','Menunggu verifikasi')}${statCard('Sedang diproses','10','wrench','blue','Termasuk perbaikan aktif')}${statCard('Selesai','06','check','green','<span class="up">↑ 3</span> pekan ini')}${statCard('Prioritas tinggi','03','clock','amber','Perlu perhatian segera')}</div>
-    <div class="admin-chart-grid"><section class="panel"><div class="panel-heading"><div><h2>Laporan per Kategori</h2><p>Distribusi laporan fasilitas</p></div><select class="control" style="width:auto;min-width:110px"><option>Bulan ini</option><option>Minggu ini</option></select></div><div class="category-bars">${items.map(([n,v,w])=>`<div><div class="bar-label"><span>${n}</span><strong>${v}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${w}%"></div></div></div>`).join('')}</div></section>
-    <section class="panel"><div class="panel-heading"><div><h2>Laporan berdasarkan Status</h2><p>Ringkasan 24 laporan</p></div></div><div class="donut-wrap"><div class="donut"></div><div class="legend">${[['Menunggu','#475569'],['Diproses','#365314'],['Diperbaiki','#65A30D'],['Selesai','#94A3B8'],['Ditolak','#CBD5E1']].map(([n,c])=>`<div class="legend-item"><span class="legend-dot" style="background:${c}"></span>${n}</div>`).join('')}</div></div></section>
-    <section class="panel"><div class="panel-heading"><div><h2>Laporan berdasarkan Lokasi</h2><p>Lokasi dengan laporan terbanyak</p></div></div><div class="chart-area">${[['Gedung A',80],['Gedung B',55],['Gedung C',72],['Gedung D',38],['Area luar',28]].map(([n,v])=>`<div class="chart-column"><div class="chart-bar" style="height:${v}%"></div><span class="chart-label">${n}</span></div>`).join('')}</div></section>
-    <section class="panel"><div class="panel-heading"><div><h2>Perlu Perhatian</h2><p>Laporan prioritas tinggi</p></div><a class="text-link" data-page="manage">Lihat semua →</a></div><div class="priority-list">${reports.filter(r=>r.urgency==='Tinggi').map(r=>`<div class="priority-item"><div class="avatar">${escapeHTML(r.reporter.split(' ').map(x=>x[0]).join(''))}</div><div><strong>${escapeHTML(r.title)}</strong><small>${escapeHTML(r.id)} · ${escapeHTML(r.location)}</small></div>${urgency(r.urgency)}</div>`).join('')}</div></section></div>`;
+  const counts = getAdminReportCounts();
+  const categories = new Map();
+  const locations = new Map();
+  for (const report of adminReports) {
+    const category = report.category || 'Kategori lain';
+    const location = report.location.split('·')[0].trim() || 'Lokasi lain';
+    categories.set(category, (categories.get(category) || 0) + 1);
+    locations.set(location, (locations.get(location) || 0) + 1);
+  }
+  const categoryItems = [...categories.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const locationItems = [...locations.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const maxCategory = Math.max(1, ...categoryItems.map(([, count]) => count));
+  const maxLocation = Math.max(1, ...locationItems.map(([, count]) => count));
+  const statusColors = ['#475569', '#365314', '#65A30D', '#94A3B8', '#CBD5E1'];
+  let statusOffset = 0;
+  const statusSegments = reportStatuses.map((status, index) => {
+    const count = adminReports.filter(report => report.status === status).length;
+    const end = statusOffset + (counts.total ? count / counts.total * 100 : 100);
+    const segment = `${statusColors[index]} ${statusOffset}% ${end}%`;
+    statusOffset = end;
+    return segment;
+  });
+  const donutStyle = counts.total
+    ? `conic-gradient(${statusSegments.join(',')})`
+    : 'conic-gradient(#e2e8f0 0% 100%)';
+  const waitingReports = adminReports.filter(report => report.status === 'Menunggu Verifikasi').slice(0, 5);
+  const today = new Date().toLocaleDateString('id-ID', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
+  return `${heading(`Selamat datang, ${escapeHTML(currentAdminName)}`,'Berikut ringkasan laporan fasilitas kampus hari ini.',`<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="date-pill">${I('calendar')} ${escapeHTML(today)}</span><button class="btn btn-primary" data-action="add-student">${I('plus')} Tambah Mahasiswa</button></div>`)}
+    ${adminReportsNotice()}
+    <div class="stats-grid admin-stats-grid">${statCard('Total laporan',String(counts.total),'reports','','Dari Supabase')}${statCard('Menunggu verifikasi',String(counts.waiting),'bell','amber','Status laporan')}${statCard('Dalam penanganan',String(counts.processing),'wrench','blue','Status laporan')}${statCard('Selesai',String(counts.completed),'check','green','Status laporan')}${statCard('Ditolak',String(counts.rejected),'clock','amber','Status laporan')}</div>
+    <div class="admin-chart-grid"><section class="panel"><div class="panel-heading"><div><h2>Laporan per Kategori</h2><p>Distribusi laporan dari Supabase</p></div></div><div class="category-bars">${categoryItems.length ? categoryItems.map(([name,count])=>`<div><div class="bar-label"><span>${escapeHTML(name)}</span><strong>${count}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${Math.max(4,count/maxCategory*100)}%"></div></div></div>`).join('') : '<p>Belum ada data kategori.</p>'}</div></section>
+    <section class="panel"><div class="panel-heading"><div><h2>Laporan berdasarkan Status</h2><p>Ringkasan dari Supabase</p></div></div><div class="donut-wrap"><div class="donut" style="background:${donutStyle}"></div><div class="legend">${reportStatuses.map((status,index)=>`<div class="legend-item"><span class="legend-dot" style="background:${statusColors[index]}"></span>${escapeHTML(status)} (${adminReports.filter(report=>report.status===status).length})</div>`).join('')}</div></div></section>
+    <section class="panel"><div class="panel-heading"><div><h2>Laporan berdasarkan Lokasi</h2><p>Lokasi dengan laporan terbanyak</p></div></div><div class="chart-area">${locationItems.length ? locationItems.map(([name,count])=>`<div class="chart-column"><div class="chart-bar" style="height:${Math.max(8,count/maxLocation*100)}%"></div><span class="chart-label">${escapeHTML(name)}</span></div>`).join('') : '<p>Belum ada data lokasi.</p>'}</div></section>
+    <section class="panel"><div class="panel-heading"><div><h2>Perlu Perhatian</h2><p>Laporan menunggu verifikasi</p></div><a class="text-link" data-page="manage">Lihat semua →</a></div><div class="priority-list">${waitingReports.length ? waitingReports.map(report=>`<div class="priority-item"><div class="avatar">A</div><div><strong>${escapeHTML(report.title)}</strong><small>${escapeHTML(report.id)} · ${escapeHTML(report.location)}</small></div>${badge(report.status)}</div>`).join('') : '<p>Tidak ada laporan yang menunggu verifikasi.</p>'}</div></section></div>`;
 }
 function managementPage() {
+  const counts = getAdminReportCounts();
   return `${heading('Manajemen Laporan','Tinjau, verifikasi, dan tindak lanjuti laporan fasilitas.',`<button class="btn btn-outline" data-action="export">${I('reports')} Ekspor</button>`)}
-    <div class="stats-grid">${statCard('Semua laporan','24','reports','','Dari seluruh periode')}${statCard('Baru masuk','08','bell','amber','Menunggu verifikasi')}${statCard('Dalam penanganan','10','wrench','blue','Sedang dikerjakan')}${statCard('Prioritas tinggi','03','clock','','Perlu perhatian')}</div>
-    <section class="panel"><div class="filters"><label class="search-box">${I('search')}<input id="admin-search" class="control" placeholder="Cari ID, pelapor, atau fasilitas..."></label><select class="control" id="admin-status"><option value="">Semua status</option>${['Menunggu Verifikasi','Diproses','Sedang Diperbaiki','Selesai','Ditolak'].map(x=>`<option>${x}</option>`).join('')}</select><select class="control" id="admin-priority"><option value="">Semua prioritas</option><option>Tinggi</option><option>Sedang</option><option>Rendah</option></select></div>
-    <div class="table-wrap"><table><thead><tr><th>ID LAPORAN</th><th>PELAPOR</th><th>FASILITAS</th><th>LOKASI</th><th>TANGGAL</th><th>PRIORITAS</th><th>STATUS</th><th>AKSI</th></tr></thead><tbody id="admin-table">${reports.map(adminRow).join('')}</tbody></table></div></section>`;
+    ${adminReportsNotice()}
+    <div class="stats-grid">${statCard('Semua laporan',String(counts.total),'reports','','Dari Supabase')}${statCard('Menunggu verifikasi',String(counts.waiting),'bell','amber','Status laporan')}${statCard('Dalam penanganan',String(counts.processing),'wrench','blue','Status laporan')}${statCard('Selesai',String(counts.completed),'check','green','Status laporan')}</div>
+    <section class="panel"><div class="filters"><label class="search-box">${I('search')}<input id="admin-search" class="control" placeholder="Cari ID, pelapor, atau fasilitas..."></label><select class="control" id="admin-status"><option value="">Semua status</option>${reportStatuses.map(x=>`<option>${x}</option>`).join('')}</select><select class="control" id="admin-priority" disabled><option value="">Prioritas belum tercatat</option></select></div>
+    <div class="table-wrap"><table><thead><tr><th>ID LAPORAN</th><th>PELAPOR</th><th>FASILITAS</th><th>LOKASI</th><th>TANGGAL</th><th>PRIORITAS</th><th>STATUS</th><th>AKSI</th></tr></thead><tbody id="admin-table">${adminReports.length ? adminReports.map(adminRow).join('') : '<tr><td colspan="8"><div class="empty-state"><h3>Belum ada laporan Supabase</h3></div></td></tr>'}</tbody></table></div></section>`;
 }
 function adminRow(r) {
-  return `<tr data-admin-row="${escapeHTML(r.id)}"><td class="td-main">${escapeHTML(r.id)}</td><td>${escapeHTML(r.reporter)}</td><td><div class="td-main">${escapeHTML(r.title)}</div><div class="td-sub">${escapeHTML(r.facility)}</div></td><td>${escapeHTML(r.location)}</td><td>${escapeHTML(r.date)}</td><td>${urgency(r.urgency)}</td><td><select class="control admin-status-select" data-status-report="${escapeHTML(r.id)}" aria-label="Ubah status laporan ${escapeHTML(r.id)}">${reportStatuses.map(status=>`<option value="${status}" ${r.status===status?'selected':''}>${status}</option>`).join('')}</select></td><td><div class="table-actions"><button class="icon-button" title="Lihat detail" data-report="${escapeHTML(r.id)}">${I('eye',14)}</button><button class="icon-button" title="Detail penanganan" data-action="edit-report" data-id="${escapeHTML(r.id)}">${I('wrench',14)}</button></div></td></tr>`;
+  return `<tr data-admin-row="${escapeHTML(r.id)}"><td class="td-main">${escapeHTML(r.id)}</td><td>${escapeHTML(r.reporter)}</td><td><div class="td-main">${escapeHTML(r.title)}</div><div class="td-sub">${escapeHTML(r.facility)}</div></td><td>${escapeHTML(r.location)}</td><td>${escapeHTML(r.date)}</td><td>${r.urgency?urgency(r.urgency):'—'}</td><td><select class="control admin-status-select" data-status-report="${escapeHTML(r.id)}" aria-label="Ubah status laporan ${escapeHTML(r.id)}">${reportStatuses.map(status=>`<option value="${status}" ${r.status===status?'selected':''}>${status}</option>`).join('')}</select></td><td><div class="table-actions"><button class="icon-button" title="Lihat detail" data-report="${escapeHTML(r.id)}">${I('eye',14)}</button><button class="icon-button" title="Detail penanganan" data-action="edit-report" data-id="${escapeHTML(r.id)}">${I('wrench',14)}</button></div></td></tr>`;
 }
 function handlingPage() {
-  const r = selectedReport || reports[0];
+  const r = selectedReport;
+  if (!r) return '<section class="panel"><p>Laporan tidak ditemukan.</p></section>';
   return `${heading('Detail Penanganan',r.id,`<button class="btn btn-outline" data-page="manage">${I('back')} Kembali</button>`)}
-    <div class="detail-layout"><div><section class="panel"><div class="detail-photo">${selectedImage?`<img src="${selectedImage}" alt="Foto kerusakan">`:`<div class="photo-placeholder">${I('camera',22)}<br>Belum ada foto terlampir</div>`}</div><div class="detail-topline"><div><h2>${escapeHTML(r.title)}</h2><p>${escapeHTML(r.facility)} · ${escapeHTML(r.id)}</p></div>${badge(r.status)}</div><div class="detail-description"><h3>Deskripsi Kerusakan</h3><p>${escapeHTML(r.description)}</p></div><div class="info-grid"><div class="info-item"><small>Pelapor</small><strong>${escapeHTML(r.reporter)}</strong></div><div class="info-item"><small>Lokasi</small><strong>${escapeHTML(r.location)}</strong></div><div class="info-item"><small>Tanggal laporan</small><strong>${escapeHTML(r.date)}</strong></div><div class="info-item"><small>Tingkat urgensi</small>${urgency(r.urgency)}</div></div></section>
-    <section class="panel"><div class="panel-heading"><div><h2>Riwayat Status</h2><p>Perubahan status laporan ini</p></div></div>${r.history.slice().reverse().map((entry,index)=>`<div class="history-item"><span class="history-dot" ${index?'style="background:#c9c4ca"':''}></span><div><strong>${escapeHTML(entry.status)}</strong><small>${escapeHTML(entry.date)} · ${entry.status==='Laporan dikirim'?'Laporan diterima sistem':'Status diperbarui oleh pengelola'}</small></div></div>`).join('')}</section>
-    <section class="panel"><div class="panel-heading"><div><h2>Catatan Penanganan</h2><p>Catatan internal dan pembaruan untuk pelapor</p></div></div><textarea class="control" id="handling-note" style="height:84px;padding:10px" placeholder="Tuliskan tindakan yang sudah atau akan dilakukan..."></textarea><button class="btn btn-primary btn-small" style="margin-top:10px" data-action="save-note">${I('check')} Simpan Catatan</button>${(r.handlingNotes||[]).length?`<div class="handling-note-list">${r.handlingNotes.slice().reverse().map(entry=>`<div class="handling-note-entry"><p>${escapeHTML(entry.note)}</p><small>${escapeHTML(entry.date)}</small></div>`).join('')}</div>`:''}</section></div>
-    <div><section class="panel"><div class="panel-heading"><div><h2>Perbarui Laporan</h2><p>Atur penanganan fasilitas</p></div></div><div class="field"><label for="handling-status">Status laporan</label><select class="control" id="handling-status">${['Menunggu Verifikasi','Diproses','Sedang Diperbaiki','Selesai','Ditolak'].map(s=>`<option ${r.status===s?'selected':''}>${s}</option>`).join('')}</select></div><div class="field" style="margin-top:13px"><label for="handling-priority">Prioritas</label><select class="control" id="handling-priority">${['Rendah','Sedang','Tinggi'].map(s=>`<option ${r.urgency===s?'selected':''}>${s}</option>`).join('')}</select></div><div class="field" style="margin-top:13px"><label for="handling-assignee">Petugas yang menangani</label><select class="control" id="handling-assignee">${['Belum ditentukan','Admin','Budi Santoso','Tim Sarana & Prasarana'].map(name=>`<option ${r.assignedTo===name?'selected':''}>${name}</option>`).join('')}</select></div><div class="field" style="margin-top:13px"><label for="repair-start-date">Tanggal mulai perbaikan</label><input class="control" id="repair-start-date" type="date" value="${escapeHTML(r.repairStartedAt||'')}"></div><div class="field" style="margin-top:13px"><label for="repair-completion-date">Tanggal selesai</label><input class="control" id="repair-completion-date" type="date" value="${escapeHTML(r.repairCompletedAt||'')}"></div><button class="btn btn-primary" style="width:100%;margin-top:18px" data-action="update-report">${I('check')} Simpan Perubahan</button></section></div></div>`;
+    <div class="detail-layout"><div><section class="panel"><div class="detail-photo">${selectedImage?`<img src="${escapeHTML(selectedImage)}" alt="Foto kerusakan">`:`<div class="photo-placeholder">${I('camera',22)}<br>Belum ada foto terlampir</div>`}</div><div class="detail-topline"><div><h2>${escapeHTML(r.title)}</h2><p>${escapeHTML(r.facility)} · ${escapeHTML(r.id)}</p></div>${badge(r.status)}</div><div class="detail-description"><h3>Deskripsi Kerusakan</h3><p>${escapeHTML(r.description)}</p></div><div class="info-grid"><div class="info-item"><small>Pelapor</small><strong>${escapeHTML(r.reporter)}</strong></div><div class="info-item"><small>Lokasi</small><strong>${escapeHTML(r.location)}</strong></div><div class="info-item"><small>Tanggal laporan</small><strong>${escapeHTML(r.date)}</strong></div></div></section>
+    <section class="panel"><div class="panel-heading"><div><h2>Status Saat Ini</h2><p>Status laporan yang terakhir tersimpan di Supabase</p></div></div><div class="history-item"><span class="history-dot"></span><div><strong>${escapeHTML(r.status)}</strong><small>${escapeHTML(r.date)}</small></div></div></section></div>
+    <div><section class="panel"><div class="panel-heading"><div><h2>Perbarui Status</h2><p>Perubahan disimpan ke Supabase.</p></div></div><div class="field"><label for="handling-status">Status laporan</label><select class="control" id="handling-status">${reportStatuses.map(status=>`<option ${r.status===status?'selected':''}>${status}</option>`).join('')}</select></div><button class="btn btn-primary" style="width:100%;margin-top:18px" data-action="update-report">${I('check')} Simpan Status</button></section></div></div>`;
 }
 function profilePage() {
   return `${heading('Profil Saya','Kelola informasi akun Anda.') }<div class="form-layout"><section class="form-card"><div class="form-section-title"><span class="step-number">${I('user',13)}</span> Informasi Akun</div><div class="form-grid"><div class="field"><label>Nama lengkap</label><input class="control" id="profile-name" value="${escapeHTML(currentUser.name)}" required></div><div class="field"><label>NPM</label><input class="control" id="profile-npm" value="${escapeHTML(currentUser.npm)}" required></div><div class="field"><label>Email kampus</label><input class="control" id="profile-email" type="email" value="${escapeHTML(currentUser.email)}"></div><div class="field"><label>Program studi</label><input class="control" value="Teknik Informatika"></div><div class="field"><label>Fakultas</label><input class="control" value="Teknik"></div><div class="field"><label>Angkatan</label><input class="control" value="2025"></div></div><div class="form-actions"><button class="btn btn-primary" data-action="save-profile">${I('check')} Simpan Perubahan</button></div></section><aside class="info-aside"><div class="info-box"><div class="avatar" id="profile-avatar" style="width:54px;height:54px;font-size:17px;margin-bottom:12px">${userInitials(currentUser.name)}</div><h3 id="profile-preview-name">${escapeHTML(currentUser.name)}</h3><p>Mahasiswa · Teknik Sipil<br>Universitas Musamus</p></div></aside></div>`;
@@ -720,7 +892,7 @@ function profilePage() {
 function shell(pageContent) {
   return `<div class="shell">${sidebar()}<div class="sidebar-overlay" id="sidebar-overlay" data-action="close-sidebar"></div><main class="main-area">${topbar()}<div class="content">${pageContent}</div></main></div>`;
 }
-function loginPage(adminMode = false, setPasswordMode = false) {
+function loginPage(adminMode = false, setPasswordMode = false, recoveryMode = false, resetRequestMode = false) {
   return `<div class="login-screen">
     <section class="login-visual">
       <div class="brand"><div class="brand-mark">${I('campus',20)}</div><div><div class="brand-name">RuangLapor</div><div class="brand-caption">Pelaporan Kerusakan Fasilitas Kampus</div></div></div>
@@ -729,14 +901,14 @@ function loginPage(adminMode = false, setPasswordMode = false) {
     </section>
     <section class="login-side"><div class="login-form-wrap">
       <div class="brand"><div class="brand-mark">${I('campus',20)}</div><div><div class="brand-name">RuangLapor</div><div class="brand-caption">Pelaporan Kerusakan Fasilitas Kampus</div></div></div>
-      ${adminMode&&!setPasswordMode?`<button class="back-login" data-action="student-login">${I('back')} Kembali ke login mahasiswa</button>`:''}
-      <h2>${setPasswordMode?'Buat Password Akun':adminMode?'Login Admin':'Pelaporan Fasilitas Kampus'}</h2>
-      <p>${setPasswordMode?'Buat password untuk menyelesaikan undangan akun mahasiswa.':adminMode?'Masuk dengan email dan password admin.':'Masuk untuk melaporkan dan memantau fasilitas kampus.'}</p>
+      ${resetRequestMode?`<button class="back-login" data-action="back-to-login">${I('back')} Kembali ke login mahasiswa</button>`:adminMode&&!setPasswordMode?`<button class="back-login" data-action="student-login">${I('back')} Kembali ke login mahasiswa</button>`:''}
+      <h2>${setPasswordMode?(recoveryMode?'Atur Ulang Password':'Buat Password Akun'):resetRequestMode?'Reset Password':adminMode?'Login Admin':'Pelaporan Fasilitas Kampus'}</h2>
+      <p>${setPasswordMode?(recoveryMode?'Buat password baru untuk akun Anda.':'Buat password untuk menyelesaikan undangan akun mahasiswa.'):resetRequestMode?'Masukkan email mahasiswa untuk menerima tautan reset password.':adminMode?'Masuk dengan email dan password admin.':'Masuk untuk melaporkan dan memantau fasilitas kampus.'}</p>
       <form id="login-form" class="login-fields">
-        ${setPasswordMode?`<div class="field"><label>Password baru</label><div class="password-wrap"><input class="control" id="login-password" type="password" required autocomplete="new-password" placeholder="Buat password"><button class="password-toggle" type="button" data-action="toggle-password" aria-label="Tampilkan password">${I('eye')}</button></div></div><div class="field"><label>Ulangi password</label><input class="control" id="login-password-confirm" type="password" required autocomplete="new-password" placeholder="Ulangi password"></div>`:`<div class="field"><label>Email kampus</label><input class="control" id="login-email" type="email" autocomplete="username" required placeholder="Masukkan email kampus"></div><div class="field"><label>Password</label><div class="password-wrap"><input class="control" id="login-password" type="password" autocomplete="current-password" required placeholder="Masukkan password"><button class="password-toggle" type="button" data-action="toggle-password" aria-label="Tampilkan password">${I('eye')}</button></div>${adminMode?'':`<div class="login-options"><label class="remember"><input type="checkbox"> Ingat saya</label><a href="#" data-action="forgot">Lupa Password?</a></div>`}</div>`}
-        <button type="submit" class="btn btn-primary login-submit">${setPasswordMode?'Simpan Password':'Masuk'} ${I('arrow')}</button>
+        ${setPasswordMode?`<div class="field"><label>Password baru</label><div class="password-wrap"><input class="control" id="login-password" type="password" required autocomplete="new-password" placeholder="Buat password"><button class="password-toggle" type="button" data-action="toggle-password" aria-label="Tampilkan password">${I('eye')}</button></div></div><div class="field"><label>Ulangi password</label><input class="control" id="login-password-confirm" type="password" required autocomplete="new-password" placeholder="Ulangi password"></div>`:resetRequestMode?`<div class="field"><label for="login-email">Email mahasiswa</label><input class="control" id="login-email" type="email" autocomplete="email" required placeholder="Masukkan email mahasiswa"></div>`:`<div class="field"><label>Email kampus</label><input class="control" id="login-email" type="email" autocomplete="username" required placeholder="Masukkan email kampus"></div><div class="field"><label>Password</label><div class="password-wrap"><input class="control" id="login-password" type="password" autocomplete="current-password" required placeholder="Masukkan password"><button class="password-toggle" type="button" data-action="toggle-password" aria-label="Tampilkan password">${I('eye')}</button></div>${adminMode?'':`<div class="login-options"><label class="remember"><input type="checkbox"> Ingat saya</label><a href="#" data-action="forgot">Lupa Password?</a></div>`}</div>`}
+        <button type="submit" class="btn btn-primary login-submit">${setPasswordMode?'Simpan Password':resetRequestMode?'Kirim Tautan Reset':'Masuk'} ${I('arrow')}</button>
       </form>
-      ${adminMode||setPasswordMode?'':`<div class="login-divider">atau</div><a href="#" class="admin-link" data-action="admin-login">Login sebagai Admin ${I('arrow',13)}</a>`}
+      ${adminMode||setPasswordMode||resetRequestMode?'':`<div class="login-divider">atau</div><a href="#" class="admin-link" data-action="admin-login">Login sebagai Admin ${I('arrow',13)}</a>`}
       <div class="login-note">Dengan masuk, Anda menyetujui kebijakan penggunaan layanan<br>Universitas Musamus.</div>
     </div></section>
   </div>`;
@@ -751,7 +923,7 @@ function render(animate = false) {
   const pages = { home:studentHome, create:createReport, mine:myReports, detail:detailPage, notifications:notificationsPage, adminHome, manage:managementPage, handling:handlingPage, profile:profilePage };
   const publicPages = { landing:landingPage, report:publicReportForm, track:trackingPage };
   appRoot.innerHTML = currentPage === 'login'
-    ? loginPage(loginMode==='admin', passwordSetupRequired)
+    ? loginPage(loginMode==='admin', passwordSetupRequired, passwordRecoveryRequired, passwordResetRequestRequired)
     : publicPages[currentPage]
       ? publicPages[currentPage]()
       : shell(pages[currentPage]());
@@ -786,6 +958,11 @@ function clearAuthenticatedUser(forceLogin = false) {
   currentUser = { ...defaultUser };
   role = 'student';
   currentAdminName = 'Admin';
+  adminReports = [];
+  adminReportsLoading = false;
+  adminReportsError = '';
+  adminReportsLoadedFor = '';
+  adminReportsLoadPromise = null;
   if (forceLogin || hadAuthenticatedUser) {
     loginMode = 'student';
     currentPage = 'login';
@@ -800,6 +977,7 @@ async function rejectAuthSession(message) {
   authInitializationPending = false;
   if (passwordSetupRequired) {
     passwordSetupRequired = false;
+    passwordRecoveryRequired = false;
     clearAuthCallbackUrl();
   }
   try {
@@ -859,16 +1037,29 @@ async function syncAuthSession(session) {
 
     const profileEmail = typeof profile?.email === 'string' ? profile.email.trim() : '';
     const authEmail = typeof session.user.email === 'string' ? session.user.email.trim() : '';
-    const profileIsValid = profile &&
-      profile.id === authUserId &&
-      typeof profile.full_name === 'string' &&
-      profile.full_name.trim().length > 0 &&
-      profileEmail.length > 0 &&
-      authEmail.length > 0 &&
-      profileEmail.toLowerCase() === authEmail.toLowerCase() &&
-      ['student', 'admin'].includes(profile.role) &&
-      (profile.role !== 'student' || (typeof profile.npm === 'string' && profile.npm.trim().length > 0));
+    const profileChecks = {
+      profileFound: Boolean(profile),
+      idMatchesAuth: profile?.id === authUserId,
+      fullNameValid: typeof profile?.full_name === 'string' && profile.full_name.trim().length > 0,
+      profileEmailPresent: profileEmail.length > 0,
+      authEmailPresent: authEmail.length > 0,
+      emailsMatch: profileEmail.length > 0 && authEmail.length > 0 &&
+        profileEmail.toLowerCase() === authEmail.toLowerCase(),
+      roleAllowed: ['student', 'admin'].includes(profile?.role),
+      studentNpmValid: profile?.role !== 'student' ||
+        (typeof profile.npm === 'string' && profile.npm.trim().length > 0),
+      studentNpmType: profile?.role === 'student' ? typeof profile.npm : 'not_applicable',
+    };
+    const profileIsValid = profileChecks.profileFound &&
+      profileChecks.idMatchesAuth &&
+      profileChecks.fullNameValid &&
+      profileChecks.profileEmailPresent &&
+      profileChecks.authEmailPresent &&
+      profileChecks.emailsMatch &&
+      profileChecks.roleAllowed &&
+      profileChecks.studentNpmValid;
     if (!profileIsValid) {
+      console.warn('Profil Auth ditolak oleh pemeriksaan frontend.', profileChecks);
       await rejectAuthSession('Profil akun tidak lengkap atau role tidak valid. Hubungi administrator.');
       return false;
     }
@@ -883,6 +1074,7 @@ async function syncAuthSession(session) {
     role = profile.role;
     currentAdminName = profile.full_name.trim();
     completeAuthenticatedRoute();
+    if (role === 'admin') void loadAdminReports();
     return true;
   })();
   authSyncInFlight = { userId: authUserId, promise };
@@ -1061,7 +1253,11 @@ function openReport(id, admin = false) {
     showToast('Sesi akun tidak valid. Silakan masuk kembali.');
     return;
   }
-  selectedReport = reports.find(r=>r.id===id) || reports[0];
+  selectedReport = (admin ? adminReports : reports).find(r=>r.id===id);
+  if (!selectedReport) {
+    showToast('Laporan tidak ditemukan. Muat ulang halaman dan coba lagi.');
+    return;
+  }
   selectedImage = selectedReport.image || '';
   currentPage = admin ? 'handling' : 'detail';
   render(true);
@@ -1077,12 +1273,21 @@ function applyMineFilters() {
 function applyAdminFilters() {
   const query=(document.getElementById('admin-search')?.value||'').toLowerCase();
   const status=document.getElementById('admin-status')?.value||'';
-  const priority=document.getElementById('admin-priority')?.value||'';
-  const rows=reports.filter(r=>(!status||r.status===status)&&(!priority||r.urgency===priority)&&(!query||`${r.id} ${r.reporter} ${r.title} ${r.facility} ${r.location}`.toLowerCase().includes(query)));
+  const rows=adminReports.filter(r=>(!status||r.status===status)&&(!query||`${r.id} ${r.reporter} ${r.title} ${r.facility} ${r.location}`.toLowerCase().includes(query)));
   document.getElementById('admin-table').innerHTML=rows.length?rows.map(adminRow).join(''):`<tr><td colspan="8"><div class="empty-state"><div class="empty-illustration">${I('search')}</div><h3>Laporan tidak ditemukan</h3><p>Coba ubah kata kunci atau filter yang dipilih.</p></div></td></tr>`;
 }
+function refreshAdminManagementPage() {
+  const query = document.getElementById('admin-search')?.value || '';
+  const status = document.getElementById('admin-status')?.value || '';
+  render(true);
+  const searchInput = document.getElementById('admin-search');
+  const statusSelect = document.getElementById('admin-status');
+  if (searchInput) searchInput.value = query;
+  if (statusSelect) statusSelect.value = status;
+  applyAdminFilters();
+}
 function exportReports() {
-  if (!reports.length) {
+  if (!adminReports.length) {
     showToast('Tidak ada laporan untuk diekspor.');
     return;
   }
@@ -1094,7 +1299,7 @@ function exportReports() {
   };
   const csv = '\uFEFF' + [
     columns,
-    ...reports.map(report => [
+    ...adminReports.map(report => [
       report.id,report.title,report.category,report.location,report.reporter,
       report.date,report.status,report.urgency,report.description
     ])
@@ -1115,12 +1320,6 @@ function exportReports() {
   }
 }
 document.addEventListener('click', e => {
-  const publicCard=e.target.closest('[data-public-report]');
-  if(publicCard){
-    selectedReport=reports.find(report=>report.id===publicCard.dataset.publicReport);
-    if(selectedReport){selectedImage=selectedReport.image||'';setPage('track');}
-    return;
-  }
   const pageButton=e.target.closest('[data-page]');
   if(pageButton){e.preventDefault();if(pageButton.dataset.page===currentPage)return;document.getElementById('sidebar')?.classList.remove('open');document.getElementById('sidebar-overlay')?.classList.remove('active');setPage(pageButton.dataset.page);return;}
   const reportButton=e.target.closest('[data-report]');
@@ -1128,6 +1327,7 @@ document.addEventListener('click', e => {
   const action=e.target.closest('[data-action]')?.dataset.action;
   if(!action)return;
   if(action==='add-student'){openAddStudentModal();return;}
+  if(action==='reload-admin-reports'){void loadAdminReports(true);return;}
   if(action==='menu'){document.getElementById('sidebar')?.classList.toggle('open');document.getElementById('sidebar-overlay')?.classList.toggle('active');}
   if(action==='close-sidebar'){document.getElementById('sidebar')?.classList.remove('open');document.getElementById('sidebar-overlay')?.classList.remove('active');}
   if(action==='logout'){
@@ -1146,6 +1346,13 @@ document.addEventListener('click', e => {
   }
   if(action==='admin-login'){e.preventDefault();loginMode='admin';setPage('login');}
   if(action==='student-login'){loginMode='student';setPage('login');}
+  if(action==='back-to-login'){
+    e.preventDefault();
+    passwordResetRequestRequired=false;
+    loginMode='student';
+    setPage('login');
+    return;
+  }
   if(action==='focus-ticket'){const search=document.querySelector('.ticket-search');search?.classList.add('search-open','search-focused');search?.scrollIntoView({behavior:'smooth',block:'center'});document.getElementById('ticket-id')?.focus();}
   if(action==='toggle-ticket-search'){document.querySelector('.ticket-search')?.classList.toggle('search-open');document.getElementById('ticket-id')?.focus();}
   if(action==='remove-public-photo'){
@@ -1156,48 +1363,33 @@ document.addEventListener('click', e => {
     document.getElementById('public-upload-zone')?.classList.remove('hidden');
   }
   if(action==='toggle-password'){const field=document.getElementById('login-password');field.type=field.type==='password'?'text':'password';e.currentTarget.innerHTML=I(field.type==='password'?'eye':'eyeOff');}
-  if(action==='forgot'){e.preventDefault();showToast('Silakan hubungi helpdesk kampus untuk reset password.');}
+  if(action==='forgot'){
+    e.preventDefault();
+    passwordResetRequestRequired=true;
+    loginMode='student';
+    render(true);
+    return;
+  }
   if(action==='read-all'){document.querySelectorAll('.notification-item.unread').forEach(x=>x.classList.remove('unread'));document.querySelectorAll('.unread-dot').forEach(x=>x.remove());showToast('Semua notifikasi ditandai sudah dibaca.');}
   if(action==='export')exportReports();
   if(action==='edit-report'){openReport(e.target.closest('[data-id]').dataset.id,true);}
-  if(action==='save-note'){
-    const note=document.getElementById('handling-note').value.trim();
-    if(!note){showToast('Tambahkan catatan sebelum menyimpan.');return;}
-    const handlingNotes=[...(selectedReport.handlingNotes||[]),{
-      note,
-      date:new Date().toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})
-    }];
-    try {
-      persistReportUpdate(selectedReport,{handlingNotes});
-      render(true);
-      showToast('Catatan penanganan berhasil disimpan.');
-    } catch(error) {
-      showToast(error.message);
-    }
-  }
   if(action==='update-report'){
-    try {
-      const repairStartedAt=document.getElementById('repair-start-date').value;
-      const repairCompletedAt=document.getElementById('repair-completion-date').value;
-      if(repairStartedAt&&repairCompletedAt&&repairCompletedAt<repairStartedAt){
-        showToast('Tanggal selesai tidak boleh lebih awal dari tanggal mulai.');
-        return;
-      }
-      const changed=updateReportStatus(
-        selectedReport,
-        document.getElementById('handling-status').value,
-        document.getElementById('handling-priority').value,
-        {
-          assignedTo:document.getElementById('handling-assignee').value,
-          repairStartedAt,
-          repairCompletedAt,
-        }
-      );
+    const statusSelect=document.getElementById('handling-status');
+    const button=e.target.closest('[data-action="update-report"]');
+    if(!selectedReport||!statusSelect||!button)return;
+    const previousStatus=selectedReport.status;
+    const status=statusSelect.value;
+    if(status===previousStatus){showToast('Status laporan tidak berubah.');return;}
+    button.disabled=true;
+    void persistAdminReportStatus(selectedReport,status).then(()=>{
       render(true);
-      showToast(changed?'Perubahan laporan berhasil disimpan.':'Tidak ada perubahan untuk disimpan.');
-    } catch(error) {
+      showToast('Status laporan berhasil disimpan ke Supabase.');
+    }).catch(error=>{
+      statusSelect.value=previousStatus;
       showToast(error.message);
-    }
+    }).finally(()=>{
+      if(button.isConnected)button.disabled=false;
+    });
   }
   if(action==='save-profile'){
     const name=document.getElementById('profile-name').value.trim();
@@ -1249,16 +1441,22 @@ document.addEventListener('change',e=>{
   if(['status-filter','category-filter'].includes(e.target.id))applyMineFilters();
   if(['admin-status','admin-priority'].includes(e.target.id))applyAdminFilters();
   if(e.target.matches('.admin-status-select')){
-    const report=reports.find(item=>item.id===e.target.dataset.statusReport);
+    const report=adminReports.find(item=>item.id===e.target.dataset.statusReport);
     if(!report){showToast('Laporan tidak ditemukan. Muat ulang halaman dan coba lagi.');return;}
-    try {
-      const changed=updateReportStatus(report,e.target.value);
-      applyAdminFilters();
-      showToast(changed?'Status laporan berhasil diperbarui.':'Status laporan tidak berubah.');
-    } catch(error) {
-      e.target.value=report.status;
+    const select=e.target;
+    const previousStatus=report.status;
+    const status=select.value;
+    if(status===previousStatus)return;
+    select.disabled=true;
+    void persistAdminReportStatus(report,status).then(()=>{
+      refreshAdminManagementPage();
+      showToast('Status laporan berhasil disimpan ke Supabase.');
+    }).catch(error=>{
+      select.value=previousStatus;
       showToast(error.message);
-    }
+    }).finally(()=>{
+      if(select.isConnected)select.disabled=false;
+    });
   }
   if(e.target.id==='photo-input'){
     const file=e.target.files[0];
@@ -1287,12 +1485,6 @@ document.addEventListener('change',e=>{
     }
   }
 });
-document.addEventListener('keydown',e=>{
-  if((e.key==='Enter'||e.key===' ')&&e.target.matches('[data-public-report]')){
-    e.preventDefault();
-    e.target.click();
-  }
-});
 document.addEventListener('dragover',e=>{
   if(e.target.closest('#public-upload-zone'))e.preventDefault();
 });
@@ -1319,21 +1511,19 @@ document.addEventListener('submit',e=>{
   if(e.target.id==='ticket-lookup'){
     e.preventDefault();
     const ticketInput=document.getElementById('ticket-id');
+    const trackingTokenInput=document.getElementById('tracking-token');
     const ticketId=(ticketInput?.value || '').trim().toUpperCase();
-    if(!ticketId){
-      showToast('Masukkan ID tiket terlebih dahulu.');
+    const trackingToken=(trackingTokenInput?.value || '').trim();
+    if(!/^RLF-\d{10}$/.test(ticketId)||!/^[a-f0-9]{64}$/i.test(trackingToken)){
+      showToast('Masukkan nomor tiket dan kunci pelacakan yang valid.');
       ticketInput?.focus();
       return;
     }
-    const report=reports.find(item=>item.id.toUpperCase()===ticketId);
-    if(!report){
-      showToast('ID tiket tidak ditemukan. Periksa kembali nomor tiket Anda.');
-      ticketInput?.focus();
-      return;
-    }
-    selectedReport=report;
-    selectedImage=report.image||'';
-    setPage('track');
+    const button=e.target.querySelector('button[type="submit"]');
+    if(button)button.disabled=true;
+    void trackReportFromSupabase(ticketId,trackingToken).catch(error=>showToast(error.message)).finally(()=>{
+      if(button?.isConnected)button.disabled=false;
+    });
     return;
   }
   if(e.target.id==='public-report-form'){
@@ -1417,7 +1607,7 @@ document.addEventListener('submit',e=>{
         status:'Laporan Diterima',
         date:savedReport.createdAt.toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})
       }]
-    }), () => setPage('track'));
+    }), () => setPage('landing'));
     return;
   }
   if(e.target.id==='login-form'){
@@ -1429,7 +1619,9 @@ document.addEventListener('submit',e=>{
     const originalButtonContent=submitButton?.innerHTML;
     if(submitButton){
       submitButton.disabled=true;
-      submitButton.textContent=passwordSetupRequired?'Menyimpan...':'Memverifikasi...';
+      submitButton.textContent=passwordSetupRequired
+        ?'Menyimpan...'
+        :passwordResetRequestRequired?'Mengirim...':'Memverifikasi...';
     }
     (async()=>{
       const passwordInput=form.querySelector('#login-password');
@@ -1456,10 +1648,60 @@ document.addEventListener('submit',e=>{
           showToast('Password belum dapat disimpan. Periksa persyaratan password dan coba lagi.');
           return;
         }
+        const isRecovery = passwordRecoveryRequired;
         passwordSetupRequired=false;
+        passwordRecoveryRequired=false;
         clearAuthCallbackUrl();
+        if(isRecovery){
+          let signOutError;
+          try{
+            ({error:signOutError}=await window.supabaseClient.auth.signOut({scope:'local'}));
+          }catch(error){
+            signOutError=error;
+          }
+          if(signOutError){
+            console.error('Sesi recovery gagal diakhiri.',{
+              code:typeof signOutError?.code==='string'?signOutError.code:undefined,
+            });
+          }
+          currentUser={...defaultUser};
+          role='student';
+          currentAdminName='Admin';
+          loginMode='student';
+          currentPage='login';
+          authInitializationPending=false;
+          render(true);
+          showToast(signOutError
+            ?'Password berhasil diperbarui, tetapi sesi belum berakhir. Silakan keluar dan masuk kembali.'
+            :'Password berhasil diperbarui. Silakan masuk dengan password baru.');
+          return;
+        }
         if(!await syncAuthSession(sessionData.session))return;
         showToast(`Password berhasil dibuat. Selamat datang, ${currentUser.name}!`);
+        return;
+      }
+
+      if(passwordResetRequestRequired){
+        const emailInput=form.querySelector('#login-email');
+        const email=(emailInput?.value || '').trim().toLowerCase();
+        if(email.length>254||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){
+          showToast('Masukkan alamat email yang valid.');
+          emailInput?.focus();
+          return;
+        }
+        const {error:resetError}=await window.supabaseClient.auth.resetPasswordForEmail(email,{
+          redirectTo:authEmailRedirectUrl,
+        });
+        if(resetError){
+          console.error('Permintaan reset password gagal.',{code:resetError.code});
+          showToast('Tautan reset belum dapat dikirim. Coba lagi beberapa saat.');
+          return;
+        }
+        passwordResetRequestRequired=false;
+        loginMode='student';
+        currentPage='login';
+        render(true);
+        showToast('Jika email tersebut terdaftar, tautan reset password akan dikirim.');
         return;
       }
 
@@ -1476,8 +1718,17 @@ document.addEventListener('submit',e=>{
         return;
       }
       const {data,error}=await window.supabaseClient.auth.signInWithPassword({email,password});
-      if(error || !data.session){
+      if(error){
+        console.warn('Supabase Auth menolak login.',{
+          code:typeof error.code==='string'?error.code:undefined,
+          status:Number.isInteger(error.status)?error.status:undefined,
+        });
         showToast('Email atau password tidak sesuai. Periksa kembali kredensial Anda.');
+        return;
+      }
+      if(!data?.session){
+        console.error('Supabase Auth tidak mengembalikan sesi setelah login.');
+        showToast('Login belum menghasilkan sesi. Coba lagi.');
         return;
       }
       if(!await syncAuthSession(data.session))return;
@@ -1572,23 +1823,19 @@ document.addEventListener('submit',e=>{
         status:'Laporan diterima',
         date:savedReport.createdAt.toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})
       }]
-    }), () => {
-      currentPage='detail';
-      render(true);
-    });
+    }), () => setPage('landing'));
   }
 });
 window.addEventListener('popstate',()=>{
   const route=location.hash.match(/^#\/track\/(.+)$/);
   if(route){
-    let report;
+    let reportId;
     try {
-      const reportId=decodeURIComponent(route[1]);
-      report=reports.find(item=>item.id===reportId);
+      reportId=decodeURIComponent(route[1]);
     } catch(error) {
       console.warn('ID tiket pada URL tidak valid.',error);
     }
-    if(report){selectedReport=report;selectedImage=report.image||'';currentPage='track';}
+    if(reportId&&reportId===authorizedTrackingTicket&&selectedReport?.id===reportId)currentPage='track';
     else currentPage='landing';
   }else if(location.hash==='#/landing')currentPage='landing';
   else if(location.hash==='#/report')currentPage='report';
@@ -1602,14 +1849,7 @@ window.addEventListener('popstate',()=>{
 });
 const initialTrack=location.hash.match(/^#\/track\/(.+)$/);
 if(initialTrack){
-  let report;
-  try {
-    const reportId=decodeURIComponent(initialTrack[1]);
-    report=reports.find(item=>item.id===reportId);
-  } catch(error) {
-    console.warn('ID tiket pada URL tidak valid.',error);
-  }
-  if(report){selectedReport=report;selectedImage=report.image||'';currentPage='track';}
+  currentPage='landing';
 }else if(location.hash==='#/landing')currentPage='landing';
 else if(location.hash==='#/report')currentPage='report';
 else if(['landing','report','track'].includes(history.state?.page))currentPage=history.state.page;
