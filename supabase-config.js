@@ -9,6 +9,7 @@ const supabaseAuthCallbackParams = new URLSearchParams(
   `${window.location.search}&${window.location.hash.slice(1)}`,
 );
 window.supabaseInviteCallback = supabaseAuthCallbackParams.get("type") === "invite";
+window.supabaseRecoveryCallback = supabaseAuthCallbackParams.get("type") === "recovery";
 
 window.supabaseClient = window.supabase.createClient(
   SUPABASE_URL,

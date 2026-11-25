@@ -56,7 +56,8 @@ const authCallbackParams = new URLSearchParams(
   `${window.location.search}&${window.location.hash.slice(1)}`
 );
 const authEmailRedirectUrl = 'https://reycardolionelalfaroyamlean1-prog.github.io/RuangLaporFasilitas/';
-let passwordRecoveryRequired = authCallbackParams.get('type') === 'recovery';
+let passwordRecoveryRequired = window.supabaseRecoveryCallback === true ||
+  authCallbackParams.get('type') === 'recovery';
 let passwordSetupRequired = window.supabaseInviteCallback === true ||
   authCallbackParams.get('type') === 'invite' ||
   passwordRecoveryRequired;
@@ -1087,6 +1088,13 @@ async function syncAuthSession(session) {
 function initializeAuthSession() {
   window.supabaseClient.auth.onAuthStateChange((event, session) => {
     if (event === 'INITIAL_SESSION') return;
+    if (event === 'PASSWORD_RECOVERY') {
+      passwordRecoveryRequired = true;
+      passwordSetupRequired = true;
+      passwordResetRequestRequired = false;
+      loginMode = 'student';
+      currentPage = 'login';
+    }
     if (event === 'SIGNED_OUT') {
       clearAuthenticatedUser(true);
       return;
