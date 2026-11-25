@@ -5,7 +5,20 @@ if (typeof window.supabase?.createClient !== "function") {
   throw new Error("Supabase JavaScript SDK gagal dimuat.");
 }
 
+const supabaseAuthCallbackParams = new URLSearchParams(
+  `${window.location.search}&${window.location.hash.slice(1)}`,
+);
+window.supabaseInviteCallback = supabaseAuthCallbackParams.get("type") === "invite";
+
 window.supabaseClient = window.supabase.createClient(
   SUPABASE_URL,
   SUPABASE_PUBLISHABLE_KEY,
+  {
+    auth: {
+      autoRefreshToken: true,
+      persistSession: true,
+      detectSessionInUrl: true,
+      storage: window.sessionStorage,
+    },
+  },
 );

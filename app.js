@@ -38,7 +38,18 @@ const userStorageKey = 'ruanglapor.user';
 const reportStatuses = ['Menunggu Verifikasi','Diproses','Sedang Diperbaiki','Selesai','Ditolak'];
 let reportCategories = null;
 let reportCategoriesPromise = null;
+let reportFacilities = null;
+let reportFacilitiesPromise = null;
 let storageWarning = false;
+let loginMode = 'student';
+let authSyncRevision = 0;
+let authSyncInFlight = null;
+let authInitializationPending = true;
+const authCallbackParams = new URLSearchParams(
+  `${window.location.search}&${window.location.hash.slice(1)}`
+);
+let passwordSetupRequired = window.supabaseInviteCallback === true ||
+  authCallbackParams.get('type') === 'invite';
 function readStoredValue(key, description) {
   try {
     return window.localStorage.getItem(key);
@@ -114,33 +125,13 @@ let selectedReport = reports[0];
 let selectedImage = '';
 let toastTimer;
 const defaultUser = {
-  name: 'Rey Yamlean',
-  npm: '202555201048',
-  email: 'reyyamlean@kampus.ac.id',
+  id: null,
+  name: '',
+  npm: '',
+  email: '',
+  role: '',
 };
-let currentUser = {
-  ...defaultUser,
-};
-const savedUser = readStoredValue(userStorageKey, 'Data akun');
-if (savedUser !== null) {
-  try {
-    const parsedUser = JSON.parse(savedUser);
-    if (parsedUser && typeof parsedUser === 'object' && !Array.isArray(parsedUser) &&
-        typeof parsedUser.name === 'string' && parsedUser.name.trim()) {
-      currentUser = {
-        name: parsedUser.name.trim(),
-        npm: typeof parsedUser.npm === 'string' ? parsedUser.npm : defaultUser.npm,
-        email: typeof parsedUser.email === 'string' ? parsedUser.email : defaultUser.email,
-      };
-    } else {
-      storageWarning = true;
-      console.warn('Data akun tersimpan tidak valid; menggunakan profil awal.');
-    }
-  } catch (error) {
-    storageWarning = true;
-    console.error('Data akun tersimpan tidak dapat dibaca; menggunakan profil awal.', error);
-  }
-}
+let currentUser = { ...defaultUser };
 
 const escapeHTML = value => String(value).replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char]));
 const userInitials = name => name.trim().split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase() || 'M';
@@ -183,6 +174,15 @@ function updateReportStatus(report, status, urgencyValue = report.urgency, handl
   persistReportUpdate(report, updates);
   return true;
 }
+function databaseIdString(value) {
+  const id = typeof value === 'string'
+    ? value.trim()
+    : typeof value === 'number' && Number.isSafeInteger(value)
+      ? String(value)
+      : '';
+  if (!/^[1-9]\d{0,18}$/.test(id)) return '';
+  return BigInt(id) <= 9223372036854775807n ? id : '';
+}
 function setReportCategoryOptions(state, categories = []) {
   const selects = document.querySelectorAll('#public-category, #report-category');
   for (const select of selects) {
@@ -204,8 +204,8 @@ function setReportCategoryOptions(state, categories = []) {
     if (state === 'loaded') {
       for (const category of categories) {
         const option = document.createElement('option');
-        option.value = category;
-        option.textContent = category;
+        option.value = category.id;
+        option.textContent = category.categoryName;
         select.append(option);
       }
     }
@@ -230,14 +230,17 @@ async function loadReportCategories() {
 
         const { data, error } = await window.supabaseClient
           .from('categories')
-          .select('category_name')
+          .select('id, category_name')
           .order('category_name', { ascending: true });
 
         if (error) throw error;
 
         return (Array.isArray(data) ? data : [])
-          .map(row => typeof row.category_name === 'string' ? row.category_name.trim() : '')
-          .filter(Boolean);
+          .map(row => ({
+            id: databaseIdString(row.id),
+            categoryName: typeof row.category_name === 'string' ? row.category_name.trim() : '',
+          }))
+          .filter(category => category.id && category.categoryName);
       })();
     }
 
@@ -249,13 +252,214 @@ async function loadReportCategories() {
     setReportCategoryOptions('error');
   }
 }
+function setReportFacilityOptions(state, facilities = []) {
+  const selects = document.querySelectorAll('#public-facility, #report-facility');
+  for (const select of selects) {
+    const disabled = state === 'loading' || state === 'error' || state === 'empty';
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = state === 'loading'
+      ? 'Memuat fasilitas...'
+      : state === 'error'
+        ? 'Fasilitas gagal dimuat. Muat ulang halaman.'
+        : state === 'empty'
+          ? 'Belum ada fasilitas tersedia.'
+          : 'Pilih fasilitas';
+    placeholder.disabled = disabled;
+    select.replaceChildren(placeholder);
+
+    if (state === 'loaded') {
+      for (const facility of facilities) {
+        const option = document.createElement('option');
+        option.value = facility.id;
+        option.textContent = facility.facilityName;
+        select.append(option);
+      }
+    }
+
+    select.disabled = disabled;
+  }
+}
+async function loadReportFacilities() {
+  const selects = document.querySelectorAll('#public-facility, #report-facility');
+  if (!selects.length) return;
+
+  if (reportFacilities !== null) {
+    setReportFacilityOptions(reportFacilities.length ? 'loaded' : 'empty', reportFacilities);
+    return;
+  }
+
+  setReportFacilityOptions('loading');
+  try {
+    if (!reportFacilitiesPromise) {
+      reportFacilitiesPromise = (async () => {
+        if (!window.supabaseClient) {
+          throw new Error('Supabase client belum tersedia.');
+        }
+
+        const { data, error } = await window.supabaseClient
+          .from('facilities')
+          .select('id, facility_name')
+          .order('facility_name', { ascending: true });
+
+        if (error) throw error;
+
+        return (Array.isArray(data) ? data : [])
+          .map(row => ({
+            id: databaseIdString(row.id),
+            facilityName: typeof row.facility_name === 'string' ? row.facility_name.trim() : '',
+          }))
+          .filter(facility => facility.id && facility.facilityName);
+      })();
+    }
+
+    reportFacilities = await reportFacilitiesPromise;
+    setReportFacilityOptions(reportFacilities.length ? 'loaded' : 'empty', reportFacilities);
+  } catch (error) {
+    reportFacilitiesPromise = null;
+    console.error('Fasilitas laporan gagal dimuat.', { code: error?.code || 'unknown' });
+    setReportFacilityOptions('error');
+  }
+}
+function reportCategoryName(categoryId) {
+  return reportCategories?.find(category => category.id === categoryId)?.categoryName || '';
+}
+function reportFacilityName(facilityId) {
+  return reportFacilities?.find(facility => facility.id === facilityId)?.facilityName || '';
+}
+const reportSubmitErrorMessages = {
+  invalid_content_type: 'Format permintaan tidak valid. Muat ulang halaman dan coba lagi.',
+  invalid_json: 'Data laporan tidak terbaca. Periksa isian dan coba lagi.',
+  invalid_request: 'Data laporan tidak valid. Periksa isian dan coba lagi.',
+  unexpected_field: 'Data laporan mengandung field yang tidak didukung. Muat ulang halaman.',
+  invalid_category_id: 'Kategori tidak tersedia. Pilih kategori kembali.',
+  invalid_facility_id: 'Fasilitas tidak tersedia. Pilih fasilitas kembali.',
+  reference_lookup_failed: 'Kategori atau fasilitas belum dapat diverifikasi. Coba lagi nanti.',
+  invalid_title: 'Judul laporan harus diisi dengan benar.',
+  invalid_description: 'Deskripsi laporan harus diisi dengan benar.',
+  invalid_location_detail: 'Detail lokasi harus diisi dengan benar.',
+  report_status_unavailable: 'Status awal laporan belum tersedia. Silakan hubungi pengelola.',
+  ticket_generation_failed: 'Nomor tiket belum dapat dibuat. Coba lagi.',
+  submission_failed: 'Laporan belum dapat disimpan. Periksa koneksi dan coba lagi.',
+  payload_too_large: 'Data laporan terlalu besar. Kurangi panjang isian dan coba lagi.',
+};
+async function submitReportToSupabase(payload) {
+  if (!window.supabaseClient) {
+    throw new Error('Koneksi Supabase belum tersedia. Muat ulang halaman dan coba lagi.');
+  }
+
+  const { data, error } = await window.supabaseClient.functions.invoke('submit-report', { body: payload });
+  if (error) {
+    let errorCode = '';
+    if (error.context instanceof Response) {
+      try {
+        const responseBody = await error.context.clone().json();
+        if (typeof responseBody?.error === 'string') errorCode = responseBody.error;
+      } catch {
+        errorCode = '';
+      }
+    }
+    const errorMessage = Object.prototype.hasOwnProperty.call(reportSubmitErrorMessages, errorCode)
+      ? reportSubmitErrorMessages[errorCode]
+      : 'Laporan belum dapat dikirim ke server. Coba lagi.';
+    throw new Error(errorMessage);
+  }
+
+  const createdAt = typeof data?.created_at === 'string' ? new Date(data.created_at) : null;
+  if (
+    typeof data?.ticket_number !== 'string' ||
+    !/^RLF-\d{10}$/.test(data.ticket_number) ||
+    data.status !== 'Menunggu Verifikasi' ||
+    !createdAt ||
+    !Number.isFinite(createdAt.getTime())
+  ) {
+    throw new Error('Respons server belum berisi nomor tiket yang valid. Laporan mungkin sudah diterima; hubungi pengelola sebelum mencoba ulang.');
+  }
+
+  return { ticketNumber: data.ticket_number, status: data.status, createdAt };
+}
+function submitReportForm(form, payload, createLocalReport, openReportPage) {
+  if (form.dataset.submissionPending === 'true') return;
+  form.dataset.submissionPending = 'true';
+  const notice = [
+    'Laporan tahap ini dikirim secara anonim. Nama pelapor tidak disimpan di Supabase.',
+    selectedImage ? 'Foto yang dipilih belum disimpan di Supabase.' : '',
+  ].filter(Boolean).join(' ');
+
+  showModal('Kirim laporan sekarang?', notice, 'Ya, kirim laporan', async () => {
+    const submitButton = form.querySelector('button[type="submit"]');
+    const originalLabel = submitButton ? submitButton.innerHTML : '';
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.setAttribute('aria-busy', 'true');
+      submitButton.innerHTML = '<span class="loading-spinner" aria-hidden="true"></span> Mengirim...';
+    }
+
+    let savedReport;
+    try {
+      savedReport = await submitReportToSupabase(payload);
+    } catch (error) {
+      form.dataset.submissionPending = 'false';
+      if (submitButton) {
+        submitButton.disabled = false;
+        submitButton.removeAttribute('aria-busy');
+        submitButton.innerHTML = originalLabel;
+      }
+      showToast(error.message);
+      return;
+    }
+
+    const localReport = createLocalReport(savedReport);
+    reports.unshift(localReport);
+    let cacheSaved = true;
+    try {
+      saveReports();
+    } catch (error) {
+      cacheSaved = false;
+      console.warn('Laporan sudah tersimpan di Supabase, tetapi salinan lokal tidak dapat diperbarui.', error);
+    }
+
+    selectedReport = localReport;
+    selectedImage = localReport.image || '';
+    openReportPage();
+    showToast([
+      `Laporan tersimpan. Tiket #${savedReport.ticketNumber}.`,
+      selectedImage ? 'Foto belum tersimpan di Supabase.' : '',
+      cacheSaved ? '' : 'Salinan lokal tidak tersimpan.',
+    ].filter(Boolean).join(' '));
+  }, () => {
+    form.dataset.submissionPending = 'false';
+  });
+}
+function authorizedPage(page) {
+  const publicPages = ['landing', 'report', 'track'];
+  const adminPages = ['adminHome', 'manage', 'handling'];
+  const studentPages = ['home', 'create', 'mine', 'detail', 'profile'];
+  if (page === 'login' && currentUser.id) {
+    page = role === 'admin' ? 'adminHome' : 'home';
+  } else if (publicPages.includes(page) || page === 'login') {
+    return page;
+  } else if (!currentUser.id) {
+    page = 'login';
+  } else if (adminPages.includes(page) && role !== 'admin') {
+    page = 'home';
+  } else if (studentPages.includes(page) && role !== 'student') {
+    page = 'adminHome';
+  } else if (page === 'notifications' && !['student', 'admin'].includes(role)) {
+    page = 'login';
+  } else if (![...adminPages, ...studentPages, 'notifications'].includes(page)) {
+    page = role === 'admin' ? 'adminHome' : 'home';
+  }
+  return page;
+}
 function setPage(page) {
+  page = authorizedPage(page);
   currentPage = page;
   if (page === 'create' || page === 'report') selectedImage = '';
   if (page === 'track' && selectedReport) {
-    history.pushState({ page, role, reportId:selectedReport.id }, '', `#/track/${encodeURIComponent(selectedReport.id)}`);
+    history.pushState({ page, reportId:selectedReport.id }, '', `#/track/${encodeURIComponent(selectedReport.id)}`);
   } else {
-    history.pushState({ page, role }, '', page === 'landing' ? `${location.pathname}${location.search}` : `#/${page}`);
+    history.pushState({ page }, '', page === 'landing' ? `${location.pathname}${location.search}` : `#/${page}`);
   }
   render(true);
 }
@@ -395,6 +599,7 @@ function publicReportForm() {
       <section class="public-form-section"><h2><span class="form-step">01</span> Kategori &amp; Lokasi</h2>
         <div class="public-field-grid">
           <div class="field"><label for="public-category">Kategori <span class="required">*</span></label><select class="control" id="public-category" required><option value="">Memuat kategori...</option></select></div>
+          <div class="field"><label for="public-facility">Fasilitas</label><select class="control" id="public-facility"><option value="">Memuat fasilitas...</option></select></div>
           <div class="field"><label for="public-building">Gedung / area <span class="required">*</span></label><select class="control" id="public-building" required><option value="">Pilih gedung atau area</option><option>Gedung A</option><option>Gedung B</option><option>Gedung C</option><option>Gedung D</option><option>Area luar</option></select></div>
           <div class="field public-field-full"><label for="public-location">Detail lokasi <span class="required">*</span></label><input class="control" id="public-location" required placeholder="Contoh: Ruang Kelas 302, dekat jendela kanan"></div>
           <div class="field public-field-full"><label for="public-title">Ringkasan kerusakan <span class="required">*</span></label><input class="control" id="public-title" required maxlength="90" placeholder="Contoh: AC Gedung A mati total"></div>
@@ -447,6 +652,7 @@ function createReport() {
         <div class="field"><label>Lokasi fasilitas <span class="required">*</span></label><select class="control" id="report-campus-location" required><option value="">Pilih lokasi kampus</option><option>Area Kampus Utama</option><option>Area Kampus Barat</option><option>Area Kampus Timur</option></select></div>
         <div class="field"><label>Gedung / ruangan <span class="required">*</span></label><input class="control" id="report-location-detail" required placeholder="Contoh: Gedung A, Ruang 204"></div>
         <div class="field"><label>Kategori fasilitas <span class="required">*</span></label><select class="control" id="report-category" required><option value="">Memuat kategori...</option></select></div>
+        <div class="field"><label for="report-facility">Fasilitas</label><select class="control" id="report-facility"><option value="">Memuat fasilitas...</option></select></div>
         <div class="field full"><label>Nama fasilitas / jenis kerusakan <span class="required">*</span></label><input class="control" id="report-title" required placeholder="Contoh: Lampu koridor mati"></div>
         <div class="field full"><label>Deskripsi kerusakan <span class="required">*</span></label><textarea class="control" id="report-description" required placeholder="Ceritakan kondisi kerusakan, sejak kapan terjadi, dan informasi lain yang membantu..."></textarea><span class="helper">Jelaskan lokasi spesifik dan kondisi kerusakan dengan singkat.</span></div>
         <div class="field full"><label>Foto kerusakan</label><label class="upload-box" for="photo-input"><div>${I('upload')}<strong id="upload-label">Klik untuk unggah atau tarik foto ke sini</strong><small>JPG atau PNG · Maksimal 5 MB</small></div><input id="photo-input" type="file" accept="image/*" hidden></label><span class="helper">Foto membantu pihak pengelola memverifikasi kondisi fasilitas dengan lebih cepat.</span></div>
@@ -484,7 +690,7 @@ function notificationsPage() {
 }
 function adminHome() {
   const items = [['Kelistrikan',8,78],['Furnitur',6,58],['Plumbing',5,46],['Elektronik',3,30],['Bangunan',2,20]];
-  return `${heading(`Selamat datang, ${escapeHTML(currentAdminName)}`,'Berikut ringkasan laporan fasilitas kampus hari ini.',`<span class="date-pill">${I('calendar')} Rabu, 28 Oktober 2026</span>`)}
+  return `${heading(`Selamat datang, ${escapeHTML(currentAdminName)}`,'Berikut ringkasan laporan fasilitas kampus hari ini.',`<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="date-pill">${I('calendar')} Rabu, 28 Oktober 2026</span><button class="btn btn-primary" data-action="add-student">${I('plus')} Tambah Mahasiswa</button></div>`)}
     <div class="stats-grid admin-stats-grid">${statCard('Total laporan','24','reports','','<span class="up">↑ 12%</span> dari bulan lalu')}${statCard('Laporan baru','08','bell','amber','Menunggu verifikasi')}${statCard('Sedang diproses','10','wrench','blue','Termasuk perbaikan aktif')}${statCard('Selesai','06','check','green','<span class="up">↑ 3</span> pekan ini')}${statCard('Prioritas tinggi','03','clock','amber','Perlu perhatian segera')}</div>
     <div class="admin-chart-grid"><section class="panel"><div class="panel-heading"><div><h2>Laporan per Kategori</h2><p>Distribusi laporan fasilitas</p></div><select class="control" style="width:auto;min-width:110px"><option>Bulan ini</option><option>Minggu ini</option></select></div><div class="category-bars">${items.map(([n,v,w])=>`<div><div class="bar-label"><span>${n}</span><strong>${v}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${w}%"></div></div></div>`).join('')}</div></section>
     <section class="panel"><div class="panel-heading"><div><h2>Laporan berdasarkan Status</h2><p>Ringkasan 24 laporan</p></div></div><div class="donut-wrap"><div class="donut"></div><div class="legend">${[['Menunggu','#475569'],['Diproses','#365314'],['Diperbaiki','#65A30D'],['Selesai','#94A3B8'],['Ditolak','#CBD5E1']].map(([n,c])=>`<div class="legend-item"><span class="legend-dot" style="background:${c}"></span>${n}</div>`).join('')}</div></div></section>
@@ -514,7 +720,7 @@ function profilePage() {
 function shell(pageContent) {
   return `<div class="shell">${sidebar()}<div class="sidebar-overlay" id="sidebar-overlay" data-action="close-sidebar"></div><main class="main-area">${topbar()}<div class="content">${pageContent}</div></main></div>`;
 }
-function loginPage(adminMode = false) {
+function loginPage(adminMode = false, setPasswordMode = false) {
   return `<div class="login-screen">
     <section class="login-visual">
       <div class="brand"><div class="brand-mark">${I('campus',20)}</div><div><div class="brand-name">RuangLapor</div><div class="brand-caption">Pelaporan Kerusakan Fasilitas Kampus</div></div></div>
@@ -523,27 +729,34 @@ function loginPage(adminMode = false) {
     </section>
     <section class="login-side"><div class="login-form-wrap">
       <div class="brand"><div class="brand-mark">${I('campus',20)}</div><div><div class="brand-name">RuangLapor</div><div class="brand-caption">Pelaporan Kerusakan Fasilitas Kampus</div></div></div>
-      ${adminMode?`<button class="back-login" data-action="student-login">${I('back')} Kembali ke login mahasiswa</button>`:''}
-      <h2>${adminMode?'Login Admin':'Pelaporan Fasilitas Kampus'}</h2>
-      <p>${adminMode?'Masukkan nama dan password untuk masuk ke panel pengelola.':'Masuk untuk melaporkan dan memantau fasilitas kampus.'}</p>
+      ${adminMode&&!setPasswordMode?`<button class="back-login" data-action="student-login">${I('back')} Kembali ke login mahasiswa</button>`:''}
+      <h2>${setPasswordMode?'Buat Password Akun':adminMode?'Login Admin':'Pelaporan Fasilitas Kampus'}</h2>
+      <p>${setPasswordMode?'Buat password untuk menyelesaikan undangan akun mahasiswa.':adminMode?'Masuk dengan email dan password admin.':'Masuk untuk melaporkan dan memantau fasilitas kampus.'}</p>
       <form id="login-form" class="login-fields">
-        ${adminMode?`<div class="field"><label>Nama admin</label><input class="control" id="admin-name" required placeholder="Masukkan nama"></div><div class="field"><label>Password</label><div class="password-wrap"><input class="control" id="login-password" type="password" required placeholder="Masukkan password apa saja"><button class="password-toggle" type="button" data-action="toggle-password" aria-label="Tampilkan password">${I('eye')}</button></div></div>`:`<div class="field"><label>Nama lengkap</label><input class="control" id="login-name" required placeholder="Masukkan nama lengkap"></div><div class="field"><label>NPM</label><input class="control" id="login-id" inputmode="numeric" required placeholder="Masukkan NPM"></div><div class="field"><label>Password</label><div class="password-wrap"><input class="control" id="login-password" type="password" required placeholder="Masukkan password"><button class="password-toggle" type="button" data-action="toggle-password" aria-label="Tampilkan password">${I('eye')}</button></div><div class="login-options"><label class="remember"><input type="checkbox"> Ingat saya</label><a href="#" data-action="forgot">Lupa Password?</a></div></div>`}
-        <button type="submit" class="btn btn-primary login-submit">${adminMode?'Masuk':'Masuk'} ${I('arrow')}</button>
+        ${setPasswordMode?`<div class="field"><label>Password baru</label><div class="password-wrap"><input class="control" id="login-password" type="password" required autocomplete="new-password" placeholder="Buat password"><button class="password-toggle" type="button" data-action="toggle-password" aria-label="Tampilkan password">${I('eye')}</button></div></div><div class="field"><label>Ulangi password</label><input class="control" id="login-password-confirm" type="password" required autocomplete="new-password" placeholder="Ulangi password"></div>`:`<div class="field"><label>Email kampus</label><input class="control" id="login-email" type="email" autocomplete="username" required placeholder="Masukkan email kampus"></div><div class="field"><label>Password</label><div class="password-wrap"><input class="control" id="login-password" type="password" autocomplete="current-password" required placeholder="Masukkan password"><button class="password-toggle" type="button" data-action="toggle-password" aria-label="Tampilkan password">${I('eye')}</button></div>${adminMode?'':`<div class="login-options"><label class="remember"><input type="checkbox"> Ingat saya</label><a href="#" data-action="forgot">Lupa Password?</a></div>`}</div>`}
+        <button type="submit" class="btn btn-primary login-submit">${setPasswordMode?'Simpan Password':'Masuk'} ${I('arrow')}</button>
       </form>
-      ${adminMode?'':`<div class="login-divider">atau</div><a href="#" class="admin-link" data-action="admin-login">Login sebagai Admin ${I('arrow',13)}</a>`}
+      ${adminMode||setPasswordMode?'':`<div class="login-divider">atau</div><a href="#" class="admin-link" data-action="admin-login">Login sebagai Admin ${I('arrow',13)}</a>`}
       <div class="login-note">Dengan masuk, Anda menyetujui kebijakan penggunaan layanan<br>Universitas Musamus.</div>
     </div></section>
   </div>`;
 }
 function render(animate = false) {
+  const appRoot = document.getElementById('app');
+  if (authInitializationPending && currentPage === 'login') {
+    appRoot.setAttribute('aria-busy', 'true');
+    return;
+  }
+  appRoot.removeAttribute('aria-busy');
   const pages = { home:studentHome, create:createReport, mine:myReports, detail:detailPage, notifications:notificationsPage, adminHome, manage:managementPage, handling:handlingPage, profile:profilePage };
   const publicPages = { landing:landingPage, report:publicReportForm, track:trackingPage };
-  document.getElementById('app').innerHTML = currentPage === 'login'
-    ? loginPage(role==='admin')
+  appRoot.innerHTML = currentPage === 'login'
+    ? loginPage(loginMode==='admin', passwordSetupRequired)
     : publicPages[currentPage]
       ? publicPages[currentPage]()
       : shell(pages[currentPage]());
   loadReportCategories();
+  loadReportFacilities();
   if(animate){
     const page=document.querySelector('.content, .public-main, .public-form-page, .public-track-page, .login-form-wrap');
     page?.classList.add('page-enter');
@@ -561,17 +774,293 @@ function showToast(message) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(()=>region.innerHTML='', 3400);
 }
-function showModal(title, message, confirmText, onConfirm) {
+function clearAuthCallbackUrl() {
+  history.replaceState(history.state, '', window.location.pathname);
+}
+function clearAuthenticatedUser(forceLogin = false) {
+  authSyncRevision += 1;
+  authSyncInFlight = null;
+  const hadAuthenticatedUser = Boolean(currentUser.id);
+  const wasInitializing = authInitializationPending;
+  authInitializationPending = false;
+  currentUser = { ...defaultUser };
+  role = 'student';
+  currentAdminName = 'Admin';
+  if (forceLogin || hadAuthenticatedUser) {
+    loginMode = 'student';
+    currentPage = 'login';
+  }
+  if (forceLogin || hadAuthenticatedUser || wasInitializing) {
+    render(true);
+  }
+}
+async function rejectAuthSession(message) {
+  authSyncRevision += 1;
+  authSyncInFlight = null;
+  authInitializationPending = false;
+  if (passwordSetupRequired) {
+    passwordSetupRequired = false;
+    clearAuthCallbackUrl();
+  }
+  try {
+    await window.supabaseClient.auth.signOut();
+  } catch (error) {
+    console.error('Sesi tidak valid gagal diakhiri.', { message: error?.message });
+  }
+  currentUser = { ...defaultUser };
+  role = 'student';
+  currentAdminName = 'Admin';
+  loginMode = 'student';
+  currentPage = 'login';
+  render(true);
+  showToast(message);
+}
+function completeAuthenticatedRoute() {
+  const wasInitializing = authInitializationPending;
+  authInitializationPending = false;
+  const nextPage = passwordSetupRequired
+    ? 'login'
+    : role === 'admin'
+      ? 'adminHome'
+      : 'home';
+  if (passwordSetupRequired) {
+    loginMode = role;
+  }
+  if (currentPage !== nextPage || wasInitializing) {
+    currentPage = nextPage;
+    render(true);
+  }
+}
+async function syncAuthSession(session) {
+  const authUserId = session?.user?.id;
+  if (typeof authUserId !== 'string' || !authUserId) {
+    clearAuthenticatedUser();
+    return false;
+  }
+  if (currentUser.id === authUserId) {
+    completeAuthenticatedRoute();
+    return true;
+  }
+  if (authSyncInFlight?.userId === authUserId) return authSyncInFlight.promise;
+
+  const revision = ++authSyncRevision;
+  const promise = (async () => {
+    const { data: profile, error } = await window.supabaseClient
+      .from('users')
+      .select('id, full_name, email, role, npm')
+      .eq('id', authUserId)
+      .maybeSingle();
+    if (revision !== authSyncRevision) return false;
+    if (error) {
+      console.error('Profil Auth gagal diverifikasi.', { code: error.code });
+      await rejectAuthSession('Profil akun tidak dapat diverifikasi. Hubungi administrator.');
+      return false;
+    }
+
+    const profileEmail = typeof profile?.email === 'string' ? profile.email.trim() : '';
+    const authEmail = typeof session.user.email === 'string' ? session.user.email.trim() : '';
+    const profileIsValid = profile &&
+      profile.id === authUserId &&
+      typeof profile.full_name === 'string' &&
+      profile.full_name.trim().length > 0 &&
+      profileEmail.length > 0 &&
+      authEmail.length > 0 &&
+      profileEmail.toLowerCase() === authEmail.toLowerCase() &&
+      ['student', 'admin'].includes(profile.role) &&
+      (profile.role !== 'student' || (typeof profile.npm === 'string' && profile.npm.trim().length > 0));
+    if (!profileIsValid) {
+      await rejectAuthSession('Profil akun tidak lengkap atau role tidak valid. Hubungi administrator.');
+      return false;
+    }
+
+    currentUser = {
+      id: profile.id,
+      name: profile.full_name.trim(),
+      npm: typeof profile.npm === 'string' ? profile.npm : '',
+      email: profileEmail,
+      role: profile.role,
+    };
+    role = profile.role;
+    currentAdminName = profile.full_name.trim();
+    completeAuthenticatedRoute();
+    return true;
+  })();
+  authSyncInFlight = { userId: authUserId, promise };
+  try {
+    return await promise;
+  } finally {
+    if (authSyncInFlight?.promise === promise) authSyncInFlight = null;
+  }
+}
+function initializeAuthSession() {
+  window.supabaseClient.auth.onAuthStateChange((event, session) => {
+    if (event === 'INITIAL_SESSION') return;
+    if (event === 'SIGNED_OUT') {
+      clearAuthenticatedUser(true);
+      return;
+    }
+    if (session) queueMicrotask(() => { void syncAuthSession(session); });
+  });
+  window.supabaseClient.auth.getSession().then(({ data, error }) => {
+    if (error) {
+      authInitializationPending = false;
+      console.error('Sesi Auth gagal dipulihkan.', { code: error.code });
+      render(true);
+      showToast('Sesi tidak dapat dipulihkan. Silakan masuk kembali.');
+      return;
+    }
+    return syncAuthSession(data.session);
+  }).catch(error => {
+    authInitializationPending = false;
+    console.error('Sesi Auth gagal dipulihkan.', { message: error?.message });
+    render(true);
+    showToast('Sesi tidak dapat dipulihkan. Silakan masuk kembali.');
+  });
+}
+function showModal(title, message, confirmText, onConfirm, onCancel = () => {}) {
   const node = document.createElement('div');
   node.className = 'modal-backdrop';
   node.innerHTML = `<section class="modal" role="dialog" aria-modal="true"><h2>${title}</h2><p>${message}</p><div class="modal-actions"><button class="btn btn-outline" data-modal-cancel>Batal</button><button class="btn btn-primary" data-modal-confirm>${confirmText}</button></div></section>`;
   document.body.appendChild(node);
   node.addEventListener('click', e => {
-    if (e.target === node || e.target.closest('[data-modal-cancel]')) node.remove();
+    if (e.target === node || e.target.closest('[data-modal-cancel]')) {
+      node.remove();
+      onCancel();
+      return;
+    }
     if (e.target.closest('[data-modal-confirm]')) { node.remove(); onConfirm(); }
   });
 }
+function openAddStudentModal() {
+  if (!currentUser.id || role !== 'admin') {
+    showToast('Sesi Admin tidak valid. Silakan masuk kembali.');
+    return;
+  }
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<section class="modal" role="dialog" aria-modal="true" aria-labelledby="add-student-title">
+    <h2 id="add-student-title">Tambah Mahasiswa</h2>
+    <p>Undangan untuk membuat password akan dikirim ke email mahasiswa.</p>
+    <form id="add-student-form">
+      <div class="field"><label for="student-full-name">Nama lengkap</label><input class="control" id="student-full-name" name="full_name" required minlength="2" maxlength="120" autocomplete="name"></div>
+      <div class="field"><label for="student-npm">NPM</label><input class="control" id="student-npm" name="npm" required inputmode="numeric" pattern="[0-9]{1,32}" maxlength="32" autocomplete="off"></div>
+      <div class="field"><label for="student-email">Email</label><input class="control" id="student-email" name="email" type="email" required maxlength="254" autocomplete="email"></div>
+      <p id="add-student-error" role="alert" aria-live="polite" style="color:#b91c1c;margin:10px 0 0"></p>
+      <div class="modal-actions"><button class="btn btn-outline" type="button" data-student-modal-close>Batal</button><button class="btn btn-primary" type="submit">Kirim Undangan</button></div>
+    </form>
+  </section>`;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector('#student-full-name').focus();
+  backdrop.addEventListener('click', event => {
+    if ((event.target === backdrop || event.target.closest('[data-student-modal-close]')) && backdrop.dataset.pending !== 'true') {
+      backdrop.remove();
+    }
+  });
+}
+async function studentInvitationErrorMessage(error) {
+  const messages = {
+    method_not_allowed: 'Permintaan tidak sesuai dengan metode yang didukung oleh fungsi.',
+    invalid_content_type: 'Permintaan tidak dapat dibaca oleh fungsi. Muat ulang halaman dan coba lagi.',
+    unauthorized: 'Sesi Admin tidak valid atau telah kedaluwarsa. Masuk kembali lalu coba lagi.',
+    authorization_check_failed: 'Profil Admin gagal diverifikasi. Hubungi administrator.',
+    forbidden: 'Akun yang digunakan tidak memiliki akses Admin.',
+    invalid_json: 'Data formulir tidak dapat dibaca. Periksa isian lalu coba lagi.',
+    invalid_request: 'Format data formulir tidak valid.',
+    unexpected_field: 'Format permintaan tidak cocok dengan fungsi. Hubungi administrator.',
+    invalid_full_name: 'Nama lengkap harus berisi 2–120 karakter yang valid.',
+    invalid_npm: 'NPM harus berisi 1–32 angka.',
+    invalid_email: 'Alamat email tidak valid.',
+    account_check_failed: 'Pemeriksaan duplikasi akun gagal. Coba lagi nanti atau hubungi administrator.',
+    student_already_exists: 'NPM atau email tersebut sudah terdaftar.',
+    invitation_failed: 'Supabase Auth gagal membuat undangan. Periksa log Edge Function dan konfigurasi email.',
+    profile_verification_failed: 'Undangan dibuat, tetapi verifikasi profil mahasiswa gagal. Periksa log Edge Function sebelum mencoba lagi.',
+    profile_sync_incomplete: 'Undangan mungkin sudah dibuat, tetapi profil mahasiswa belum terverifikasi. Periksa data dan log Edge Function sebelum mencoba lagi.',
+  };
+  const response = error?.context && typeof error.context.clone === 'function'
+    ? error.context.clone()
+    : null;
+  if (response) {
+    try {
+      const body = await response.json();
+      if (typeof body?.error === 'string' && messages[body.error]) return messages[body.error];
+    } catch {
+      // The response body may not be JSON; do not expose its contents.
+    }
+    return `Fungsi menolak atau gagal memproses permintaan (HTTP ${response.status}). Periksa log Edge Function.`;
+  }
+  if (error?.name === 'FunctionsFetchError') {
+    return 'Tidak dapat menghubungi Edge Function. Periksa koneksi lalu coba lagi.';
+  }
+  return 'Undangan gagal diproses. Periksa log Edge Function untuk mengetahui penyebabnya.';
+}
+async function submitStudentInvitation(form) {
+  if (form.dataset.pending === 'true') return;
+  form.dataset.pending = 'true';
+  const submitButton = form.querySelector('button[type="submit"]');
+  const closeButton = form.querySelector('[data-student-modal-close]');
+  const errorMessage = form.querySelector('#add-student-error');
+  const originalButtonText = submitButton.textContent;
+  submitButton.disabled = true;
+  closeButton.disabled = true;
+  submitButton.textContent = 'Mengirim...';
+  errorMessage.textContent = '';
+  try {
+    if (!currentUser.id || role !== 'admin') {
+      throw new Error('admin_session_invalid');
+    }
+    const fullName = form.elements.full_name.value.trim().replace(/\s+/g, ' ');
+    const npm = form.elements.npm.value.trim();
+    const email = form.elements.email.value.trim().toLowerCase();
+    if (fullName.length < 2 || fullName.length > 120 || /[\u0000-\u001f\u007f]/.test(fullName)) {
+      errorMessage.textContent = 'Nama lengkap harus berisi 2–120 karakter yang valid.';
+      form.elements.full_name.focus();
+      return;
+    }
+    if (!/^\d{1,32}$/.test(npm)) {
+      errorMessage.textContent = 'NPM harus berisi 1–32 angka.';
+      form.elements.npm.focus();
+      return;
+    }
+    const { data: sessionData, error: sessionError } = await window.supabaseClient.auth.getSession();
+    if (sessionError || sessionData.session?.user?.id !== currentUser.id) {
+      throw new Error('admin_session_invalid');
+    }
+    const { data, error } = await window.supabaseClient.functions.invoke('admin-create-student', {
+      body: { full_name: fullName, npm, email },
+    });
+    if (error) {
+      console.error('Undangan mahasiswa gagal dikirim.', {
+        errorType: error.name || 'unknown',
+        status: error.context?.status,
+      });
+      errorMessage.textContent = await studentInvitationErrorMessage(error);
+      return;
+    }
+    if (data?.success !== 'invitation_sent') {
+      errorMessage.textContent = 'Respons Edge Function tidak sesuai. Periksa log Edge Function sebelum mencoba lagi.';
+      return;
+    }
+    form.closest('.modal-backdrop')?.remove();
+    showToast('Undangan berhasil dikirim ke email mahasiswa.');
+  } catch (error) {
+    console.error('Undangan mahasiswa gagal dikirim.', { code: error?.message });
+    errorMessage.textContent = error?.message === 'admin_session_invalid'
+      ? 'Sesi Admin tidak valid atau telah berakhir. Silakan masuk kembali.'
+      : 'Undangan gagal dikirim. Pastikan fungsi tersedia dan coba lagi.';
+  } finally {
+    form.dataset.pending = 'false';
+    if (submitButton.isConnected) {
+      submitButton.disabled = false;
+      submitButton.textContent = originalButtonText;
+    }
+    if (closeButton.isConnected) closeButton.disabled = false;
+  }
+}
 function openReport(id, admin = false) {
+  if (!currentUser.id || (admin && role !== 'admin') || (!admin && role !== 'student')) {
+    showToast('Sesi akun tidak valid. Silakan masuk kembali.');
+    return;
+  }
   selectedReport = reports.find(r=>r.id===id) || reports[0];
   selectedImage = selectedReport.image || '';
   currentPage = admin ? 'handling' : 'detail';
@@ -638,11 +1127,25 @@ document.addEventListener('click', e => {
   if(reportButton){openReport(reportButton.dataset.report,role==='admin');return;}
   const action=e.target.closest('[data-action]')?.dataset.action;
   if(!action)return;
+  if(action==='add-student'){openAddStudentModal();return;}
   if(action==='menu'){document.getElementById('sidebar')?.classList.toggle('open');document.getElementById('sidebar-overlay')?.classList.toggle('active');}
   if(action==='close-sidebar'){document.getElementById('sidebar')?.classList.remove('open');document.getElementById('sidebar-overlay')?.classList.remove('active');}
-  if(action==='logout'){role='student';setPage('login');}
-  if(action==='admin-login'){e.preventDefault();role='admin';setPage('login');}
-  if(action==='student-login'){role='student';setPage('login');}
+  if(action==='logout'){
+    e.preventDefault();
+    window.supabaseClient.auth.signOut().then(({ error }) => {
+      if (error) {
+        console.error('Logout Supabase Auth gagal.', { code: error.code });
+        showToast('Logout gagal. Periksa koneksi dan coba lagi.');
+        return;
+      }
+      showToast('Anda berhasil keluar.');
+    }).catch(error => {
+      console.error('Logout Supabase Auth gagal.', { message: error?.message });
+      showToast('Logout gagal. Periksa koneksi dan coba lagi.');
+    });
+  }
+  if(action==='admin-login'){e.preventDefault();loginMode='admin';setPage('login');}
+  if(action==='student-login'){loginMode='student';setPage('login');}
   if(action==='focus-ticket'){const search=document.querySelector('.ticket-search');search?.classList.add('search-open','search-focused');search?.scrollIntoView({behavior:'smooth',block:'center'});document.getElementById('ticket-id')?.focus();}
   if(action==='toggle-ticket-search'){document.querySelector('.ticket-search')?.classList.toggle('search-open');document.getElementById('ticket-id')?.focus();}
   if(action==='remove-public-photo'){
@@ -702,12 +1205,17 @@ document.addEventListener('click', e => {
     if(!name||!npm){showToast('Nama lengkap dan NPM wajib diisi.');return;}
     const updatedUser={...currentUser,name,npm,email:document.getElementById('profile-email').value.trim()};
     const updatedReports=reports.map(report=>report.reporter===currentUser.name?{...report,reporter:name}:report);
-    if(!writeStoredValue(userStorageKey,JSON.stringify(updatedUser),'Data akun')){
+    const cachedProfile={name:updatedUser.name,npm:updatedUser.npm,email:updatedUser.email};
+    if(!writeStoredValue(userStorageKey,JSON.stringify(cachedProfile),'Data akun')){
       showToast('Profil belum dapat disimpan. Periksa pengaturan penyimpanan browser dan coba lagi.');
       return;
     }
     if(!writeStoredValue(reportsStorageKey,JSON.stringify(updatedReports),'Data laporan')){
-      const rolledBack=writeStoredValue(userStorageKey,JSON.stringify(currentUser),'Pemulihan data akun');
+      const rolledBack=writeStoredValue(userStorageKey,JSON.stringify({
+        name:currentUser.name,
+        npm:currentUser.npm,
+        email:currentUser.email,
+      }),'Pemulihan data akun');
       showToast(rolledBack
         ?'Perubahan profil dibatalkan karena laporan tidak dapat disimpan.'
         :'Profil dan laporan tidak tersimpan secara konsisten. Muat ulang setelah penyimpanan browser tersedia.');
@@ -801,6 +1309,13 @@ document.addEventListener('drop',e=>{
   input.dispatchEvent(new Event('change',{bubbles:true}));
 });
 document.addEventListener('submit',e=>{
+  if(e.target.id==='add-student-form'){
+    e.preventDefault();
+    const form=e.target;
+    if(!form.reportValidity())return;
+    void submitStudentInvitation(form);
+    return;
+  }
   if(e.target.id==='ticket-lookup'){
     e.preventDefault();
     const ticketInput=document.getElementById('ticket-id');
@@ -825,7 +1340,11 @@ document.addEventListener('submit',e=>{
     e.preventDefault();
     const form=e.target;
     const categorySelect=form.querySelector('#public-category');
-    const category=categorySelect?.value || '';
+    const categoryId=categorySelect?.value || '';
+    const category=reportCategoryName(categoryId);
+    const facilitySelect=form.querySelector('#public-facility');
+    const facilityId=facilitySelect?.value || null;
+    const facility=facilityId ? reportFacilityName(facilityId) : '';
     const buildingSelect=form.querySelector('#public-building');
     const building=buildingSelect?.value || '';
     const locationInput=form.querySelector('#public-location');
@@ -838,9 +1357,14 @@ document.addEventListener('submit',e=>{
     const reporterInput=form.querySelector('#public-reporter');
     const reporter=anonymous?'Anonim':(reporterInput?.value || '').trim();
 
-    if(!category){
+    if(!categoryId || !category){
       showToast('Pilih kategori fasilitas terlebih dahulu.');
       categorySelect?.focus();
+      return;
+    }
+    if(facilityId && !facility){
+      showToast('Fasilitas tidak tersedia. Pilih fasilitas kembali.');
+      facilitySelect?.focus();
       return;
     }
     if(!building){
@@ -869,105 +1393,105 @@ document.addEventListener('submit',e=>{
       return;
     }
 
-    showModal('Kirim laporan sekarang?','Pastikan lokasi dan deskripsi sudah sesuai. Setelah dikirim, simpan ID tiket untuk memantau progresnya.','Ya, kirim laporan',()=>{
-      const submitButton=form.querySelector('button[type="submit"]');
-      const originalLabel=submitButton ? submitButton.innerHTML : '';
-      if(submitButton){
-        submitButton.disabled=true;
-        submitButton.setAttribute('aria-busy','true');
-        submitButton.innerHTML='<span class="loading-spinner" aria-hidden="true"></span> Mengirim...';
-      }
-      setTimeout(()=>{
-        const ticketNumber=Math.max(8920,...reports.map(report=>Number(report.id.match(/^RLF-(\d+)$/)?.[1]||0)))+1;
-        const createdAt=new Date();
-        const newReport={
-          id:`RLF-${ticketNumber}`,
-          title,
-          facility:category,
-          category,
-          location:`${building} · ${details}`,
-          date:createdAt.toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'}),
-          timeAgo:'Baru saja',
-          status:'Menunggu Verifikasi',
-          urgency:'Sedang',
-          reporter,
-          anonymous,
-          description,
-          image:selectedImage,
-          history:[{status:'Laporan Diterima',date:createdAt.toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})}]
-        };
-        reports.unshift(newReport);
-        try{
-          saveReports();
-        }catch(error){
-          reports.shift();
-          if(submitButton){
-            submitButton.disabled=false;
-            submitButton.removeAttribute('aria-busy');
-            submitButton.innerHTML=originalLabel;
-          }
-          showToast('Laporan belum dapat disimpan di browser ini.');
-          return;
-        }
-        selectedReport=newReport;
-        selectedImage=newReport.image||'';
-        setPage('track');
-        showToast(`Laporan terkirim. Simpan tiket #${newReport.id} untuk melacaknya.`);
-      },250);
-    });
+    const locationDetail=`${building} · ${details}`;
+    submitReportForm(form, {
+      category_id:categoryId,
+      facility_id:facilityId,
+      title,
+      description,
+      location_detail:locationDetail,
+    }, savedReport => ({
+      id:savedReport.ticketNumber,
+      title,
+      facility:facility || category,
+      category,
+      location:locationDetail,
+      date:savedReport.createdAt.toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'}),
+      timeAgo:'Baru saja',
+      status:savedReport.status,
+      urgency:'Sedang',
+      reporter:'Anonim',
+      description,
+      image:selectedImage,
+      history:[{
+        status:'Laporan Diterima',
+        date:savedReport.createdAt.toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})
+      }]
+    }), () => setPage('track'));
     return;
   }
   if(e.target.id==='login-form'){
     e.preventDefault();
-    let userSaved=true;
-    if(role==='admin'){
-      const adminInput=document.getElementById('admin-name');
-      const passInput=document.getElementById('login-password');
-      const name=(adminInput?.value || '').trim();
-      const pass=(passInput?.value || '').trim();
-      if(!name){
-        showToast('Nama admin wajib diisi.');
-        adminInput?.focus();
-        return;
-      }
-      if(!pass){
-        showToast('Password wajib diisi.');
-        passInput?.focus();
-        return;
-      }
-      currentAdminName=name;
-    } else {
-      const nameInput=document.getElementById('login-name');
-      const npmInput=document.getElementById('login-id');
-      const passInput=document.getElementById('login-password');
-      const name=(nameInput?.value || '').trim();
-      const npm=(npmInput?.value || '').trim();
-      const pass=(passInput?.value || '').trim();
-      if(!name){
-        showToast('Nama lengkap wajib diisi.');
-        nameInput?.focus();
-        return;
-      }
-      if(!npm){
-        showToast('NPM wajib diisi.');
-        npmInput?.focus();
-        return;
-      }
-      if(!pass){
-        showToast('Password wajib diisi.');
-        passInput?.focus();
-        return;
-      }
-      const email=name===currentUser.name&&npm===currentUser.npm?currentUser.email:'';
-      const nextUser={...currentUser,name,npm,email};
-      userSaved=writeStoredValue(userStorageKey,JSON.stringify(nextUser),'Data akun');
-      currentUser=nextUser;
+    const form=e.target;
+    if(form.dataset.authPending==='true')return;
+    form.dataset.authPending='true';
+    const submitButton=form.querySelector('button[type="submit"]');
+    const originalButtonContent=submitButton?.innerHTML;
+    if(submitButton){
+      submitButton.disabled=true;
+      submitButton.textContent=passwordSetupRequired?'Menyimpan...':'Memverifikasi...';
     }
-    currentPage=role==='admin'?'adminHome':'home';
-    render(true);
-    showToast(role==='student'&&!userSaved
-      ?'Login berhasil, tetapi data akun tidak tersimpan di browser ini.'
-      :`Selamat datang, ${role==='admin'?currentAdminName:currentUser.name}!`);
+    (async()=>{
+      const passwordInput=form.querySelector('#login-password');
+      const password=passwordInput?.value || '';
+      if(passwordSetupRequired){
+        const confirmInput=form.querySelector('#login-password-confirm');
+        if(!password || password!==confirmInput?.value){
+          showToast('Password wajib diisi dan harus sama pada kedua kolom.');
+          (password?confirmInput:passwordInput)?.focus();
+          return;
+        }
+        const {data:sessionData,error:sessionError}=await window.supabaseClient.auth.getSession();
+        if(sessionError){
+          console.error('Sesi undangan gagal diperiksa.',{code:sessionError.code});
+          showToast('Sesi undangan tidak dapat diverifikasi. Buka kembali tautan undangan.');
+          return;
+        }
+        if(!sessionData.session){
+          showToast('Tautan undangan tidak valid atau sudah kedaluwarsa. Minta admin mengirim ulang.');
+          return;
+        }
+        const {error:updateError}=await window.supabaseClient.auth.updateUser({password});
+        if(updateError){
+          showToast('Password belum dapat disimpan. Periksa persyaratan password dan coba lagi.');
+          return;
+        }
+        passwordSetupRequired=false;
+        clearAuthCallbackUrl();
+        if(!await syncAuthSession(sessionData.session))return;
+        showToast(`Password berhasil dibuat. Selamat datang, ${currentUser.name}!`);
+        return;
+      }
+
+      const emailInput=form.querySelector('#login-email');
+      const email=(emailInput?.value || '').trim().toLowerCase();
+      if(!email){
+        showToast('Email kampus wajib diisi.');
+        emailInput?.focus();
+        return;
+      }
+      if(!password){
+        showToast('Password wajib diisi.');
+        passwordInput?.focus();
+        return;
+      }
+      const {data,error}=await window.supabaseClient.auth.signInWithPassword({email,password});
+      if(error || !data.session){
+        showToast('Email atau password tidak sesuai. Periksa kembali kredensial Anda.');
+        return;
+      }
+      if(!await syncAuthSession(data.session))return;
+      showToast(`Selamat datang, ${currentUser.name}!`);
+    })().catch(error=>{
+      console.error('Proses autentikasi gagal.',{message:error?.message});
+      showToast('Proses autentikasi gagal. Periksa koneksi dan coba lagi.');
+    }).finally(()=>{
+      form.dataset.authPending='false';
+      if(submitButton?.isConnected){
+        submitButton.disabled=false;
+        submitButton.innerHTML=originalButtonContent;
+      }
+    });
   }
   if(e.target.id==='report-form'){
     e.preventDefault();
@@ -979,7 +1503,11 @@ document.addEventListener('submit',e=>{
     const roomInput=form.querySelector('#report-location-detail') || form.querySelector('input[placeholder^="Contoh: Gedung"]');
     const roomLoc=(roomInput?.value || '').trim();
     const catSelect=form.querySelector('#report-category') || form.querySelectorAll('select')[1];
-    const cat=catSelect?.value || '';
+    const categoryId=catSelect?.value || '';
+    const cat=reportCategoryName(categoryId);
+    const facilitySelect=form.querySelector('#report-facility');
+    const facilityId=facilitySelect?.value || null;
+    const facility=facilityId ? reportFacilityName(facilityId) : '';
     const titleInput=form.querySelector('#report-title') || form.querySelector('input[placeholder^="Contoh: Lampu"]');
     const title=(titleInput?.value || '').trim();
     const descTextarea=form.querySelector('#report-description') || form.querySelector('textarea');
@@ -1000,9 +1528,14 @@ document.addEventListener('submit',e=>{
       roomInput?.focus();
       return;
     }
-    if(!cat){
+    if(!categoryId || !cat){
       showToast('Pilih kategori fasilitas.');
       catSelect?.focus();
+      return;
+    }
+    if(facilityId && !facility){
+      showToast('Fasilitas tidak tersedia. Pilih fasilitas kembali.');
+      facilitySelect?.focus();
       return;
     }
     if(!title){
@@ -1016,59 +1549,36 @@ document.addEventListener('submit',e=>{
       return;
     }
 
-    showModal('Kirim laporan sekarang?','Pastikan informasi dan lokasi kerusakan sudah benar. Laporan akan dikirim ke tim fasilitas untuk diverifikasi.','Ya, kirim laporan',()=>{
-      const submitButton=form.querySelector('button[type="submit"]');
-      const originalLabel=submitButton?submitButton.innerHTML:'';
-      if(submitButton){
-        submitButton.disabled=true;
-        submitButton.setAttribute('aria-busy','true');
-        submitButton.innerHTML='<span class="loading-spinner" aria-hidden="true"></span> Mengirim...';
-      }
-      setTimeout(()=>{
-        const location=campusLoc?`${campusLoc} · ${roomLoc}`:roomLoc;
-        const lapMatches=reports.map(r=>Number(r.id.match(/^LAP-\d+-(\d+)$/)?.[1]||0));
-        const nextId=(lapMatches.length?Math.max(84,...lapMatches):84)+1;
-        const now=new Date();
-        const dateStr=now.toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'});
-        const newReport={
-          id:`LAP-2026-${String(nextId).padStart(3,'0')}`,
-          title,
-          facility:cat,
-          location,
-          date:dateStr,
-          status:'Menunggu Verifikasi',
-          urgency:form.querySelector('input[name="urgency"]:checked')?.value||'Sedang',
-          reporter,
-          category:cat,
-          description:descVal,
-          image:selectedImage,
-          history:[{status:'Laporan dikirim',date:dateStr}]
-        };
-        reports.unshift(newReport);
-        try{
-          saveReports();
-        }catch(error){
-          reports.shift();
-          if(submitButton){
-            submitButton.disabled=false;
-            submitButton.removeAttribute('aria-busy');
-            submitButton.innerHTML=originalLabel;
-          }
-          showToast('Laporan belum dapat disimpan di browser. Coba lagi.');
-          return;
-        }
-        selectedReport=newReport;
-        currentUser.name=reporter;
-        selectedImage=selectedReport.image||'';
-        currentPage='detail';
-        render(true);
-        showToast('Laporan berhasil dikirim! Kami akan memberi kabar saat status diperbarui.');
-      },250);
+    const locationDetail=campusLoc?`${campusLoc} · ${roomLoc}`:roomLoc;
+    submitReportForm(form, {
+      category_id:categoryId,
+      facility_id:facilityId,
+      title,
+      description:descVal,
+      location_detail:locationDetail,
+    }, savedReport => ({
+      id:savedReport.ticketNumber,
+      title,
+      facility:facility || cat,
+      location:locationDetail,
+      date:savedReport.createdAt.toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'}),
+      status:savedReport.status,
+      urgency:form.querySelector('input[name="urgency"]:checked')?.value||'Sedang',
+      reporter:'Anonim',
+      category:cat,
+      description:descVal,
+      image:selectedImage,
+      history:[{
+        status:'Laporan diterima',
+        date:savedReport.createdAt.toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})
+      }]
+    }), () => {
+      currentPage='detail';
+      render(true);
     });
   }
 });
 window.addEventListener('popstate',()=>{
-  if(history.state?.role==='student'||history.state?.role==='admin')role=history.state.role;
   const route=location.hash.match(/^#\/track\/(.+)$/);
   if(route){
     let report;
@@ -1086,6 +1596,7 @@ window.addEventListener('popstate',()=>{
   else if(['home','create','mine','detail','notifications','adminHome','manage','handling','profile','login'].includes(history.state?.page)){
     currentPage=history.state.page;
   }else currentPage='login';
+  currentPage=authorizedPage(currentPage);
   if(currentPage==='create'||currentPage==='report')selectedImage='';
   render(true);
 });
@@ -1102,6 +1613,7 @@ if(initialTrack){
 }else if(location.hash==='#/landing')currentPage='landing';
 else if(location.hash==='#/report')currentPage='report';
 else if(['landing','report','track'].includes(history.state?.page))currentPage=history.state.page;
-if(!history.state?.page)history.replaceState({page:currentPage,role},'',location.href);
+if(!history.state?.page)history.replaceState({page:currentPage},'',location.href);
 render();
+initializeAuthSession();
 if(storageWarning)showToast('Sebagian data browser tidak dapat dibaca atau disimpan. Aplikasi tetap dapat digunakan, tetapi perubahan mungkin tidak tersimpan.');
