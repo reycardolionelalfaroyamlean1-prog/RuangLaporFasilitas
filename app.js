@@ -894,6 +894,7 @@ function shell(pageContent) {
   return `<div class="shell">${sidebar()}<div class="sidebar-overlay" id="sidebar-overlay" data-action="close-sidebar"></div><main class="main-area">${topbar()}<div class="content">${pageContent}</div></main></div>`;
 }
 function loginPage(adminMode = false, setPasswordMode = false, recoveryMode = false, resetRequestMode = false) {
+  const passwordFormMode = setPasswordMode || recoveryMode;
   return `<div class="login-screen">
     <section class="login-visual">
       <div class="brand"><div class="brand-mark">${I('campus',20)}</div><div><div class="brand-name">RuangLapor</div><div class="brand-caption">Pelaporan Kerusakan Fasilitas Kampus</div></div></div>
@@ -902,14 +903,14 @@ function loginPage(adminMode = false, setPasswordMode = false, recoveryMode = fa
     </section>
     <section class="login-side"><div class="login-form-wrap">
       <div class="brand"><div class="brand-mark">${I('campus',20)}</div><div><div class="brand-name">RuangLapor</div><div class="brand-caption">Pelaporan Kerusakan Fasilitas Kampus</div></div></div>
-      ${resetRequestMode?`<button class="back-login" data-action="back-to-login">${I('back')} Kembali ke login mahasiswa</button>`:adminMode&&!setPasswordMode?`<button class="back-login" data-action="student-login">${I('back')} Kembali ke login mahasiswa</button>`:''}
-      <h2>${setPasswordMode?(recoveryMode?'Atur Ulang Password':'Buat Password Akun'):resetRequestMode?'Reset Password':adminMode?'Login Admin':'Pelaporan Fasilitas Kampus'}</h2>
-      <p>${setPasswordMode?(recoveryMode?'Buat password baru untuk akun Anda.':'Buat password untuk menyelesaikan undangan akun mahasiswa.'):resetRequestMode?'Masukkan email mahasiswa untuk menerima tautan reset password.':adminMode?'Masuk dengan email dan password admin.':'Masuk untuk melaporkan dan memantau fasilitas kampus.'}</p>
+      ${resetRequestMode?`<button class="back-login" data-action="back-to-login">${I('back')} Kembali ke login mahasiswa</button>`:adminMode&&!passwordFormMode?`<button class="back-login" data-action="student-login">${I('back')} Kembali ke login mahasiswa</button>`:''}
+      <h2>${passwordFormMode?(recoveryMode?'Atur Ulang Password':'Buat Password Akun'):resetRequestMode?'Reset Password':adminMode?'Login Admin':'Pelaporan Fasilitas Kampus'}</h2>
+      <p>${passwordFormMode?(recoveryMode?'Buat password baru untuk akun Anda.':'Buat password untuk menyelesaikan undangan akun mahasiswa.'):resetRequestMode?'Masukkan email mahasiswa untuk menerima tautan reset password.':adminMode?'Masuk dengan email dan password admin.':'Masuk untuk melaporkan dan memantau fasilitas kampus.'}</p>
       <form id="login-form" class="login-fields">
-        ${setPasswordMode?`<div class="field"><label>Password baru</label><div class="password-wrap"><input class="control" id="login-password" type="password" required autocomplete="new-password" placeholder="Buat password"><button class="password-toggle" type="button" data-action="toggle-password" aria-label="Tampilkan password">${I('eye')}</button></div></div><div class="field"><label>Ulangi password</label><input class="control" id="login-password-confirm" type="password" required autocomplete="new-password" placeholder="Ulangi password"></div>`:resetRequestMode?`<div class="field"><label for="login-email">Email mahasiswa</label><input class="control" id="login-email" type="email" autocomplete="email" required placeholder="Masukkan email mahasiswa"></div>`:`<div class="field"><label>Email kampus</label><input class="control" id="login-email" type="email" autocomplete="username" required placeholder="Masukkan email kampus"></div><div class="field"><label>Password</label><div class="password-wrap"><input class="control" id="login-password" type="password" autocomplete="current-password" required placeholder="Masukkan password"><button class="password-toggle" type="button" data-action="toggle-password" aria-label="Tampilkan password">${I('eye')}</button></div>${adminMode?'':`<div class="login-options"><label class="remember"><input type="checkbox"> Ingat saya</label><a href="#" data-action="forgot">Lupa Password?</a></div>`}</div>`}
-        <button type="submit" class="btn btn-primary login-submit">${setPasswordMode?'Simpan Password':resetRequestMode?'Kirim Tautan Reset':'Masuk'} ${I('arrow')}</button>
+        ${passwordFormMode?`<div class="field"><label>Password baru</label><div class="password-wrap"><input class="control" id="login-password" type="password" required autocomplete="new-password" placeholder="Buat password"><button class="password-toggle" type="button" data-action="toggle-password" aria-label="Tampilkan password">${I('eye')}</button></div></div><div class="field"><label>Ulangi password</label><input class="control" id="login-password-confirm" type="password" required autocomplete="new-password" placeholder="Ulangi password"></div>`:resetRequestMode?`<div class="field"><label for="login-email">Email mahasiswa</label><input class="control" id="login-email" type="email" autocomplete="email" required placeholder="Masukkan email mahasiswa"></div>`:`<div class="field"><label>Email kampus</label><input class="control" id="login-email" type="email" autocomplete="username" required placeholder="Masukkan email kampus"></div><div class="field"><label>Password</label><div class="password-wrap"><input class="control" id="login-password" type="password" autocomplete="current-password" required placeholder="Masukkan password"><button class="password-toggle" type="button" data-action="toggle-password" aria-label="Tampilkan password">${I('eye')}</button></div>${adminMode?'':`<div class="login-options"><label class="remember"><input type="checkbox"> Ingat saya</label><a href="#" data-action="forgot">Lupa Password?</a></div>`}</div>`}
+        <button type="submit" class="btn btn-primary login-submit">${passwordFormMode?'Simpan Password':resetRequestMode?'Kirim Tautan Reset':'Masuk'} ${I('arrow')}</button>
       </form>
-      ${adminMode||setPasswordMode||resetRequestMode?'':`<div class="login-divider">atau</div><a href="#" class="admin-link" data-action="admin-login">Login sebagai Admin ${I('arrow',13)}</a>`}
+      ${adminMode||passwordFormMode||resetRequestMode?'':`<div class="login-divider">atau</div><a href="#" class="admin-link" data-action="admin-login">Login sebagai Admin ${I('arrow',13)}</a>`}
       <div class="login-note">Dengan masuk, Anda menyetujui kebijakan penggunaan layanan<br>Universitas Musamus.</div>
     </div></section>
   </div>`;
@@ -1094,6 +1095,7 @@ function initializeAuthSession() {
       passwordResetRequestRequired = false;
       loginMode = 'student';
       currentPage = 'login';
+      render(true);
     }
     if (event === 'SIGNED_OUT') {
       clearAuthenticatedUser(true);
