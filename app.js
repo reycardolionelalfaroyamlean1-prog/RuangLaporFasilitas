@@ -45,6 +45,8 @@ let loginMode = 'student';
 let passwordResetRequestRequired = false;
 let authSyncRevision = 0;
 let authSyncInFlight = null;
+let authTransitionRevision = 0;
+let authMutationQueue = Promise.resolve();
 let authInitializationPending = true;
 let adminReports = [];
 let adminReportsLoading = false;
@@ -951,7 +953,25 @@ function showToast(message) {
 function clearAuthCallbackUrl() {
   history.replaceState(history.state, '', window.location.pathname);
 }
-function clearAuthenticatedUser(forceLogin = false) {
+function beginAuthTransition() {
+  authTransitionRevision += 1;
+  authSyncRevision += 1;
+  authSyncInFlight = null;
+  return authTransitionRevision;
+}
+function queueAuthMutation(operation) {
+  const operationPromise = authMutationQueue.then(operation, operation);
+  authMutationQueue = operationPromise.then(() => undefined, () => undefined);
+  return operationPromise;
+}
+function sameAuthSession(left, right) {
+  return Boolean(left?.user?.id && left.user.id === right?.user?.id &&
+    typeof left.access_token === 'string' && left.access_token === right.access_token);
+}
+function clearAuthenticatedUser(forceLogin = false, expectedTransitionRevision) {
+  if (expectedTransitionRevision !== undefined &&
+      expectedTransitionRevision !== authTransitionRevision) return false;
+  authTransitionRevision += 1;
   authSyncRevision += 1;
   authSyncInFlight = null;
   const hadAuthenticatedUser = Boolean(currentUser.id);
@@ -972,28 +992,65 @@ function clearAuthenticatedUser(forceLogin = false) {
   if (forceLogin || hadAuthenticatedUser || wasInitializing) {
     render(true);
   }
+  return true;
 }
-async function rejectAuthSession(message) {
-  authSyncRevision += 1;
-  authSyncInFlight = null;
-  authInitializationPending = false;
-  if (passwordSetupRequired) {
-    passwordSetupRequired = false;
-    passwordRecoveryRequired = false;
-    clearAuthCallbackUrl();
+async function rejectAuthSession(message, session, transitionRevision, syncRevision) {
+  if (transitionRevision !== authTransitionRevision || syncRevision !== authSyncRevision) {
+    return false;
   }
-  try {
-    await window.supabaseClient.auth.signOut();
-  } catch (error) {
-    console.error('Sesi tidak valid gagal diakhiri.', { message: error?.message });
-  }
-  currentUser = { ...defaultUser };
-  role = 'student';
-  currentAdminName = 'Admin';
-  loginMode = 'student';
-  currentPage = 'login';
-  render(true);
-  showToast(message);
+  return queueAuthMutation(async () => {
+    if (transitionRevision !== authTransitionRevision || syncRevision !== authSyncRevision) {
+      return false;
+    }
+
+    let currentSession;
+    try {
+      const { data, error } = await window.supabaseClient.auth.getSession();
+      if (error) {
+        console.error('Sesi Auth gagal diverifikasi sebelum ditolak.', { code: error.code });
+        if (transitionRevision === authTransitionRevision &&
+            syncRevision === authSyncRevision) {
+          showToast('Sesi Auth belum dapat diverifikasi. Silakan coba masuk kembali.');
+        }
+        return false;
+      }
+      currentSession = data.session;
+    } catch (error) {
+      console.error('Sesi Auth gagal diverifikasi sebelum ditolak.', { message: error?.message });
+      if (transitionRevision === authTransitionRevision &&
+          syncRevision === authSyncRevision) {
+        showToast('Sesi Auth belum dapat diverifikasi. Silakan coba masuk kembali.');
+      }
+      return false;
+    }
+
+    if (transitionRevision !== authTransitionRevision ||
+        syncRevision !== authSyncRevision ||
+        !sameAuthSession(currentSession, session)) {
+      return false;
+    }
+
+    let signOutError;
+    try {
+      ({ error: signOutError } = await window.supabaseClient.auth.signOut({ scope: 'local' }));
+    } catch (error) {
+      signOutError = error;
+    }
+    if (transitionRevision !== authTransitionRevision || syncRevision !== authSyncRevision) {
+      return false;
+    }
+    if (signOutError) {
+      console.error('Sesi Auth tidak valid gagal diakhiri.', { message: signOutError?.message });
+    }
+    if (passwordSetupRequired) {
+      passwordSetupRequired = false;
+      passwordRecoveryRequired = false;
+      clearAuthCallbackUrl();
+    }
+    if (!clearAuthenticatedUser(true, transitionRevision)) return false;
+    showToast(message);
+    return false;
+  });
 }
 function completeAuthenticatedRoute() {
   const wasInitializing = authInitializationPending;
@@ -1011,17 +1068,22 @@ function completeAuthenticatedRoute() {
     render(true);
   }
 }
-async function syncAuthSession(session) {
+async function syncAuthSession(session, transitionRevision = authTransitionRevision) {
+  if (transitionRevision !== authTransitionRevision) return false;
   const authUserId = session?.user?.id;
   if (typeof authUserId !== 'string' || !authUserId) {
-    clearAuthenticatedUser();
+    clearAuthenticatedUser(false, transitionRevision);
     return false;
   }
   if (currentUser.id === authUserId) {
     completeAuthenticatedRoute();
     return true;
   }
-  if (authSyncInFlight?.userId === authUserId) return authSyncInFlight.promise;
+  if (authSyncInFlight?.userId === authUserId &&
+      authSyncInFlight.transitionRevision === transitionRevision &&
+      sameAuthSession(authSyncInFlight.session, session)) {
+    return authSyncInFlight.promise;
+  }
 
   const revision = ++authSyncRevision;
   const promise = (async () => {
@@ -1030,10 +1092,17 @@ async function syncAuthSession(session) {
       .select('id, full_name, email, role, npm')
       .eq('id', authUserId)
       .maybeSingle();
-    if (revision !== authSyncRevision) return false;
+    if (revision !== authSyncRevision || transitionRevision !== authTransitionRevision) {
+      return false;
+    }
     if (error) {
       console.error('Profil Auth gagal diverifikasi.', { code: error.code });
-      await rejectAuthSession('Profil akun tidak dapat diverifikasi. Hubungi administrator.');
+      await rejectAuthSession(
+        'Profil akun tidak dapat diverifikasi. Hubungi administrator.',
+        session,
+        transitionRevision,
+        revision,
+      );
       return false;
     }
 
@@ -1062,7 +1131,12 @@ async function syncAuthSession(session) {
       profileChecks.studentNpmValid;
     if (!profileIsValid) {
       console.warn('Profil Auth ditolak oleh pemeriksaan frontend.', profileChecks);
-      await rejectAuthSession('Profil akun tidak lengkap atau role tidak valid. Hubungi administrator.');
+      await rejectAuthSession(
+        'Profil akun tidak lengkap atau role tidak valid. Hubungi administrator.',
+        session,
+        transitionRevision,
+        revision,
+      );
       return false;
     }
 
@@ -1079,7 +1153,7 @@ async function syncAuthSession(session) {
     if (role === 'admin') void loadAdminReports();
     return true;
   })();
-  authSyncInFlight = { userId: authUserId, promise };
+  authSyncInFlight = { userId: authUserId, transitionRevision, session, promise };
   try {
     return await promise;
   } finally {
@@ -1098,12 +1172,32 @@ function initializeAuthSession() {
       render(true);
     }
     if (event === 'SIGNED_OUT') {
-      clearAuthenticatedUser(true);
+      const transitionRevision = authTransitionRevision;
+      void queueAuthMutation(async () => {
+        const { data, error } = await window.supabaseClient.auth.getSession();
+        if (error) {
+          console.error('Sesi Auth gagal diperiksa setelah logout.', { code: error.code });
+          return;
+        }
+        if (data.session) {
+          const currentRevision = authTransitionRevision;
+          queueMicrotask(() => { void syncAuthSession(data.session, currentRevision); });
+          return;
+        }
+        clearAuthenticatedUser(true, transitionRevision);
+      }).catch(error => {
+        console.error('Sesi Auth gagal diperiksa setelah logout.', { message: error?.message });
+      });
       return;
     }
-    if (session) queueMicrotask(() => { void syncAuthSession(session); });
+    if (session) {
+      const transitionRevision = beginAuthTransition();
+      queueMicrotask(() => { void syncAuthSession(session, transitionRevision); });
+    }
   });
+  const initializationRevision = authTransitionRevision;
   window.supabaseClient.auth.getSession().then(({ data, error }) => {
+    if (initializationRevision !== authTransitionRevision) return;
     if (error) {
       authInitializationPending = false;
       console.error('Sesi Auth gagal dipulihkan.', { code: error.code });
@@ -1111,8 +1205,9 @@ function initializeAuthSession() {
       showToast('Sesi tidak dapat dipulihkan. Silakan masuk kembali.');
       return;
     }
-    return syncAuthSession(data.session);
+    return syncAuthSession(data.session, initializationRevision);
   }).catch(error => {
+    if (initializationRevision !== authTransitionRevision) return;
     authInitializationPending = false;
     console.error('Sesi Auth gagal dipulihkan.', { message: error?.message });
     render(true);
@@ -1342,7 +1437,8 @@ document.addEventListener('click', e => {
   if(action==='close-sidebar'){document.getElementById('sidebar')?.classList.remove('open');document.getElementById('sidebar-overlay')?.classList.remove('active');}
   if(action==='logout'){
     e.preventDefault();
-    window.supabaseClient.auth.signOut().then(({ error }) => {
+    beginAuthTransition();
+    queueAuthMutation(() => window.supabaseClient.auth.signOut()).then(({ error }) => {
       if (error) {
         console.error('Logout Supabase Auth gagal.', { code: error.code });
         showToast('Logout gagal. Periksa koneksi dan coba lagi.');
@@ -1653,7 +1749,10 @@ document.addEventListener('submit',e=>{
           showToast('Tautan undangan tidak valid atau sudah kedaluwarsa. Minta admin mengirim ulang.');
           return;
         }
-        const {error:updateError}=await window.supabaseClient.auth.updateUser({password});
+        beginAuthTransition();
+        const {error:updateError}=await queueAuthMutation(
+          () => window.supabaseClient.auth.updateUser({password})
+        );
         if(updateError){
           showToast('Password belum dapat disimpan. Periksa persyaratan password dan coba lagi.');
           return;
@@ -1664,8 +1763,11 @@ document.addEventListener('submit',e=>{
         clearAuthCallbackUrl();
         if(isRecovery){
           let signOutError;
+          const recoveryRevision=beginAuthTransition();
           try{
-            ({error:signOutError}=await window.supabaseClient.auth.signOut({scope:'local'}));
+            ({error:signOutError}=await queueAuthMutation(
+              () => window.supabaseClient.auth.signOut({scope:'local'})
+            ));
           }catch(error){
             signOutError=error;
           }
@@ -1674,19 +1776,25 @@ document.addEventListener('submit',e=>{
               code:typeof signOutError?.code==='string'?signOutError.code:undefined,
             });
           }
-          currentUser={...defaultUser};
-          role='student';
-          currentAdminName='Admin';
-          loginMode='student';
-          currentPage='login';
-          authInitializationPending=false;
-          render(true);
+          if(recoveryRevision===authTransitionRevision){
+            clearAuthenticatedUser(true,recoveryRevision);
+          }
           showToast(signOutError
             ?'Password berhasil diperbarui, tetapi sesi belum berakhir. Silakan keluar dan masuk kembali.'
             :'Password berhasil diperbarui. Silakan masuk dengan password baru.');
           return;
         }
-        if(!await syncAuthSession(sessionData.session))return;
+        const {data:updatedSessionData,error:updatedSessionError}=await window.supabaseClient.auth.getSession();
+        if(updatedSessionError){
+          console.error('Sesi undangan gagal diperiksa setelah password dibuat.',{code:updatedSessionError.code});
+          showToast('Sesi akun belum dapat diverifikasi. Silakan masuk kembali.');
+          return;
+        }
+        if(!updatedSessionData.session){
+          showToast('Sesi akun berakhir setelah password dibuat. Silakan masuk kembali.');
+          return;
+        }
+        if(!await syncAuthSession(updatedSessionData.session))return;
         showToast(`Password berhasil dibuat. Selamat datang, ${currentUser.name}!`);
         return;
       }
@@ -1727,7 +1835,10 @@ document.addEventListener('submit',e=>{
         passwordInput?.focus();
         return;
       }
-      const {data,error}=await window.supabaseClient.auth.signInWithPassword({email,password});
+      beginAuthTransition();
+      const {data,error}=await queueAuthMutation(
+        () => window.supabaseClient.auth.signInWithPassword({email,password})
+      );
       if(error){
         console.warn('Supabase Auth menolak login.',{
           code:typeof error.code==='string'?error.code:undefined,
@@ -1741,7 +1852,17 @@ document.addEventListener('submit',e=>{
         showToast('Login belum menghasilkan sesi. Coba lagi.');
         return;
       }
-      if(!await syncAuthSession(data.session))return;
+      const {data:currentSessionData,error:currentSessionError}=await window.supabaseClient.auth.getSession();
+      if(currentSessionError){
+        console.error('Sesi login gagal diverifikasi.',{code:currentSessionError.code});
+        showToast('Sesi login belum dapat diverifikasi. Silakan coba lagi.');
+        return;
+      }
+      if(!currentSessionData.session){
+        showToast('Sesi login berakhir sebelum profil dimuat. Silakan coba lagi.');
+        return;
+      }
+      if(!await syncAuthSession(currentSessionData.session))return;
       showToast(`Selamat datang, ${currentUser.name}!`);
     })().catch(error=>{
       console.error('Proses autentikasi gagal.',{message:error?.message});
