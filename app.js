@@ -430,11 +430,24 @@ async function trackReportFromSupabase(ticketNumber, trackingToken) {
     body: { ticket_number: ticketNumber, tracking_token: trackingToken },
   });
   if (error || !data?.report) {
+    let responseError = '';
+    if (error?.context instanceof Response) {
+      try {
+        const responseBody = await error.context.clone().json();
+        const safeErrorCodes = new Set(['tracking_unavailable', 'invalid_request', 'report_not_found']);
+        if (safeErrorCodes.has(responseBody?.error)) responseError = responseBody.error;
+      } catch {
+        responseError = '';
+      }
+    }
     console.error('Pelacakan laporan gagal.', {
       code: error?.code,
       status: error?.status,
-      responseError: data?.error,
+      responseError: responseError || undefined,
     });
+    if (responseError === 'tracking_unavailable') {
+      throw new Error('Layanan pelacakan sedang bermasalah. Coba lagi nanti.');
+    }
     throw new Error('Laporan tidak ditemukan atau kunci pelacakan tidak sesuai.');
   }
   const row = data.report;
@@ -544,13 +557,35 @@ async function persistAdminReportStatus(report, status) {
   const { data, error } = await window.supabaseClient.functions.invoke('admin-reports', {
     body: { action: 'update_status', ticket_number: report.id, status },
   });
+  let backendErrorCode = '';
+  if (error?.context instanceof Response) {
+    try {
+      const responseBody = await error.context.clone().json();
+      const safeErrorCodes = new Set([
+        'method_not_allowed',
+        'invalid_content_type',
+        'unauthorized',
+        'authorization_check_failed',
+        'forbidden',
+        'invalid_json',
+        'invalid_request',
+        'report_status_unavailable',
+        'status_update_failed',
+        'report_not_found',
+      ]);
+      if (safeErrorCodes.has(responseBody?.error)) backendErrorCode = responseBody.error;
+    } catch {
+      backendErrorCode = '';
+    }
+  }
   if (error || data?.report?.status !== status) {
     console.error('Status laporan gagal disimpan.', {
       code: error?.code,
       status: error?.status,
-      responseError: data?.error,
+      responseError: backendErrorCode || undefined,
     });
-    throw new Error('Status laporan belum dapat disimpan ke Supabase.');
+    const detail = backendErrorCode ? ` (kode: ${backendErrorCode})` : '';
+    throw new Error(`Status laporan belum dapat disimpan ke Supabase.${detail}`);
   }
   report.status = data.report.status;
   report.statusId = data.report.status_id;
@@ -801,7 +836,7 @@ function reportCard(r) {
 }
 function myReports() {
   const mine = reports.filter(r=>r.reporter===currentUser.name);
-  return `${heading('Laporan Saya','Pantau status dan perkembangan laporan fasilitas yang Anda kirim.',`<button class="btn btn-primary" data-page="create">${I('plus')} Buat Laporan</button>`)}
+  return `${heading('Laporan Saya','Daftar lokal pada browser ini. Gunakan pelacakan tiket untuk membaca status terbaru di Supabase.',`<button class="btn btn-primary" data-page="create">${I('plus')} Buat Laporan</button>`)}
     <div class="filters"><label class="search-box">${I('search')}<input class="control" id="report-search" placeholder="Cari laporan atau nomor..."></label><select class="control" id="status-filter"><option value="">Semua status</option>${['Menunggu Verifikasi','Diproses','Sedang Diperbaiki','Selesai','Ditolak'].map(x=>`<option>${x}</option>`).join('')}</select><select class="control" id="category-filter"><option value="">Semua kategori</option>${[...new Set(mine.map(r=>r.category))].map(x=>`<option>${x}</option>`).join('')}</select></div>
     <div class="report-cards" id="my-report-list">${mine.length ? mine.map(reportCard).join('') : `<section class="panel empty-state"><div class="empty-illustration">${I('reports')}</div><h3>Belum ada laporan</h3><p>Laporan yang Anda kirim akan muncul di sini dan bisa dipantau perkembangannya.</p><button class="btn btn-primary btn-small" data-page="create">${I('plus')} Buat Laporan</button></section>`}</div>`;
 }
@@ -811,8 +846,8 @@ function detailPage() {
   const current = r.status === 'Selesai' ? 5 : r.status === 'Sedang Diperbaiki' ? 3 : r.status === 'Diproses' ? 2 : 1;
   return `${heading('Detail Laporan',`Laporan ${escapeHTML(r.id)}`,`<button class="btn btn-outline" data-page="mine">${I('back')} Kembali</button>`)}
     <div class="detail-layout"><div><section class="panel"><div class="detail-photo">${selectedImage ? `<img src="${selectedImage}" alt="Foto fasilitas rusak">` : `<div class="photo-placeholder">${I('camera',22)}<br>Foto kerusakan belum tersedia</div>`}</div><div class="detail-topline"><div><h2>${escapeHTML(r.title)}</h2><p>${escapeHTML(r.facility)} · ${escapeHTML(r.id)}</p></div>${badge(r.status)}</div><div class="detail-description"><h3>Deskripsi Kerusakan</h3><p>${escapeHTML(r.description)}</p></div><div class="info-grid"><div class="info-item"><small>Lokasi</small><strong>${escapeHTML(r.location)}</strong></div><div class="info-item"><small>Tanggal laporan</small><strong>${escapeHTML(r.date)}</strong></div><div class="info-item"><small>Tingkat urgensi</small>${urgency(r.urgency)}</div><div class="info-item"><small>Pelapor</small><strong>${escapeHTML(r.reporter)}</strong></div></div></section>
-    <section class="panel"><div class="panel-heading"><div><h2>Riwayat Perubahan Status</h2><p>Catatan aktivitas laporan Anda</p></div></div>${r.history.slice().reverse().map((entry,index)=>`<div class="history-item"><span class="history-dot" ${index?'style="background:#c9c4ca"':''}></span><div><strong>${escapeHTML(entry.status)}</strong><small>${escapeHTML(entry.date)} · ${entry.status==='Laporan dikirim'?'Laporan diterima sistem':'Status diperbarui oleh pengelola'}</small></div></div>`).join('')}</section></div>
-    <div><section class="panel"><div class="panel-heading"><div><h2>Progres Penanganan</h2><p>Perjalanan laporan sampai selesai</p></div></div>    <div class="timeline">${steps.map((s,i)=>`<div class="timeline-item ${i<current?'completed':i===current?'current':''}"><span class="timeline-marker"></span><div><strong>${s}</strong><small>${i<current ? (i===0?r.date:'Selesai') : i===current?'Sedang berlangsung':'Menunggu'}</small></div></div>`).join('')}</div></section><div class="notice-card"><div class="notice-icon">${I('bell')}</div><div><strong>Perubahan status?</strong><p>Kami akan memberi tahu Anda setiap kali ada perkembangan terbaru.</p></div></div></div></div>`;
+    <section class="panel"><div class="panel-heading"><div><h2>Status pada Salinan Browser</h2><p>Riwayat perubahan permanen belum tersedia. Gunakan pelacakan tiket untuk status terbaru.</p></div></div><div class="history-item"><span class="history-dot"></span><div><strong>${escapeHTML(r.status)}</strong><small>${escapeHTML(r.date)}</small></div></div></section></div>
+    <div><section class="panel"><div class="panel-heading"><div><h2>Ringkasan Progres</h2><p>Tahap diperkirakan dari status pada salinan lokal.</p></div></div>    <div class="timeline">${steps.map((s,i)=>`<div class="timeline-item ${i<current?'completed':i===current?'current':''}"><span class="timeline-marker"></span><div><strong>${s}</strong><small>${i<current ? (i===0?r.date:'Selesai') : i===current?'Sedang berlangsung':'Menunggu'}</small></div></div>`).join('')}</div></section><div class="notice-card"><div class="notice-icon">${I('bell')}</div><div><strong>Status terbaru</strong><p>Gunakan nomor tiket dan kunci pelacakan untuk membaca status terbaru di Supabase.</p></div></div></div></div>`;
 }
 function notificationsPage() {
   const notes = [
@@ -822,7 +857,7 @@ function notificationsPage() {
     ['reports','Laporan telah diverifikasi','Laporan LAP-2026-079 telah diverifikasi dan masuk antrean perbaikan.','20 Okt 2026',false],
     ['bell','Laporan baru diterima','Laporan LAP-2026-061 berhasil dikirim. Kami akan segera meninjaunya.','19 Okt 2026',false],
   ];
-  return `${heading('Notifikasi','Tetap terhubung dengan perkembangan penanganan laporan Anda.',`<button class="btn btn-outline btn-small" data-action="read-all">Tandai semua dibaca</button>`)}<section class="panel"><div class="notification-list">${notes.map(([icon,title,text,date,unread])=>`<div class="notification-item ${unread?'unread':''}"><div class="notice-icon">${I(icon)}</div><div><strong>${title}</strong><p>${text}</p><small>${date}</small></div>${unread?'<span class="unread-dot"></span>':''}</div>`).join('')}</div></section>`;
+  return `${heading('Notifikasi','Data contoh lokal; notifikasi belum terhubung ke Supabase.',`<button class="btn btn-outline btn-small" data-action="read-all">Tandai semua dibaca</button>`)}<section class="panel"><div class="notification-list">${notes.map(([icon,title,text,date,unread])=>`<div class="notification-item ${unread?'unread':''}"><div class="notice-icon">${I(icon)}</div><div><strong>${title}</strong><p>${text}</p><small>${date}</small></div>${unread?'<span class="unread-dot"></span>':''}</div>`).join('')}</div></section>`;
 }
 function getAdminReportCounts() {
   const count = status => adminReports.filter(report => report.status === status).length;
@@ -875,11 +910,11 @@ function managementPage() {
   return `${heading('Manajemen Laporan','Tinjau, verifikasi, dan tindak lanjuti laporan fasilitas.',`<button class="btn btn-outline" data-action="export">${I('reports')} Ekspor</button>`)}
     ${adminReportsNotice()}
     <div class="stats-grid">${statCard('Semua laporan',String(counts.total),'reports','','Dari Supabase')}${statCard('Menunggu verifikasi',String(counts.waiting),'bell','amber','Status laporan')}${statCard('Dalam penanganan',String(counts.processing),'wrench','blue','Status laporan')}${statCard('Selesai',String(counts.completed),'check','green','Status laporan')}</div>
-    <section class="panel"><div class="filters"><label class="search-box">${I('search')}<input id="admin-search" class="control" placeholder="Cari ID, pelapor, atau fasilitas..."></label><select class="control" id="admin-status"><option value="">Semua status</option>${reportStatuses.map(x=>`<option>${x}</option>`).join('')}</select><select class="control" id="admin-priority" disabled><option value="">Prioritas belum tercatat</option></select></div>
-    <div class="table-wrap"><table><thead><tr><th>ID LAPORAN</th><th>PELAPOR</th><th>FASILITAS</th><th>LOKASI</th><th>TANGGAL</th><th>PRIORITAS</th><th>STATUS</th><th>AKSI</th></tr></thead><tbody id="admin-table">${adminReports.length ? adminReports.map(adminRow).join('') : '<tr><td colspan="8"><div class="empty-state"><h3>Belum ada laporan Supabase</h3></div></td></tr>'}</tbody></table></div></section>`;
+    <section class="panel"><div class="filters"><label class="search-box">${I('search')}<input id="admin-search" class="control" placeholder="Cari ID, pelapor, kategori, atau fasilitas..."></label><select class="control" id="admin-status"><option value="">Semua status</option>${reportStatuses.map(x=>`<option>${x}</option>`).join('')}</select><select class="control" id="admin-priority" disabled><option value="">Prioritas belum tercatat</option></select></div>
+    <div class="table-wrap"><table><thead><tr><th>ID LAPORAN</th><th>PELAPOR</th><th>LAPORAN</th><th>KATEGORI</th><th>FASILITAS</th><th>LOKASI</th><th>TANGGAL</th><th>PRIORITAS</th><th>STATUS</th><th>AKSI</th></tr></thead><tbody id="admin-table">${adminReports.length ? adminReports.map(adminRow).join('') : '<tr><td colspan="10"><div class="empty-state"><h3>Belum ada laporan Supabase</h3></div></td></tr>'}</tbody></table></div></section>`;
 }
 function adminRow(r) {
-  return `<tr data-admin-row="${escapeHTML(r.id)}"><td class="td-main">${escapeHTML(r.id)}</td><td>${escapeHTML(r.reporter)}</td><td><div class="td-main">${escapeHTML(r.title)}</div><div class="td-sub">${escapeHTML(r.facility)}</div></td><td>${escapeHTML(r.location)}</td><td>${escapeHTML(r.date)}</td><td>${r.urgency?urgency(r.urgency):'—'}</td><td><select class="control admin-status-select" data-status-report="${escapeHTML(r.id)}" aria-label="Ubah status laporan ${escapeHTML(r.id)}">${reportStatuses.map(status=>`<option value="${status}" ${r.status===status?'selected':''}>${status}</option>`).join('')}</select></td><td><div class="table-actions"><button class="icon-button" title="Lihat detail" data-report="${escapeHTML(r.id)}">${I('eye',14)}</button><button class="icon-button" title="Detail penanganan" data-action="edit-report" data-id="${escapeHTML(r.id)}">${I('wrench',14)}</button></div></td></tr>`;
+  return `<tr data-admin-row="${escapeHTML(r.id)}"><td class="td-main">${escapeHTML(r.id)}</td><td>${escapeHTML(r.reporter)}</td><td><div class="td-main">${escapeHTML(r.title)}</div></td><td>${escapeHTML(r.category)}</td><td>${escapeHTML(r.facility)}</td><td>${escapeHTML(r.location)}</td><td>${escapeHTML(r.date)}</td><td>${r.urgency?urgency(r.urgency):'—'}</td><td><select class="control admin-status-select" data-status-report="${escapeHTML(r.id)}" aria-label="Ubah status laporan ${escapeHTML(r.id)}">${reportStatuses.map(status=>`<option value="${status}" ${r.status===status?'selected':''}>${status}</option>`).join('')}</select></td><td><div class="table-actions"><button class="icon-button" title="Lihat detail" data-report="${escapeHTML(r.id)}">${I('eye',14)}</button><button class="icon-button" title="Detail penanganan" data-action="edit-report" data-id="${escapeHTML(r.id)}">${I('wrench',14)}</button></div></td></tr>`;
 }
 function handlingPage() {
   const r = selectedReport;
@@ -1378,8 +1413,8 @@ function applyMineFilters() {
 function applyAdminFilters() {
   const query=(document.getElementById('admin-search')?.value||'').toLowerCase();
   const status=document.getElementById('admin-status')?.value||'';
-  const rows=adminReports.filter(r=>(!status||r.status===status)&&(!query||`${r.id} ${r.reporter} ${r.title} ${r.facility} ${r.location}`.toLowerCase().includes(query)));
-  document.getElementById('admin-table').innerHTML=rows.length?rows.map(adminRow).join(''):`<tr><td colspan="8"><div class="empty-state"><div class="empty-illustration">${I('search')}</div><h3>Laporan tidak ditemukan</h3><p>Coba ubah kata kunci atau filter yang dipilih.</p></div></td></tr>`;
+  const rows=adminReports.filter(r=>(!status||r.status===status)&&(!query||`${r.id} ${r.reporter} ${r.title} ${r.category} ${r.facility} ${r.location}`.toLowerCase().includes(query)));
+  document.getElementById('admin-table').innerHTML=rows.length?rows.map(adminRow).join(''):`<tr><td colspan="10"><div class="empty-state"><div class="empty-illustration">${I('search')}</div><h3>Laporan tidak ditemukan</h3><p>Coba ubah kata kunci atau filter yang dipilih.</p></div></td></tr>`;
 }
 function refreshAdminManagementPage() {
   const query = document.getElementById('admin-search')?.value || '';
